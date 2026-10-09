@@ -25,6 +25,7 @@ type RecentTurn = {
 type ContextEnvelope = {
   summary: string
   recent: RecentTurn[]
+  last_answer?: string
 }
 
 type ChatTurn = {
@@ -47,7 +48,7 @@ const EXAMPLES = [
   '肺癌免疫治疗一线方案如何选择',
 ]
 
-const EMPTY_CONTEXT: ContextEnvelope = { summary: '', recent: [] }
+const EMPTY_CONTEXT: ContextEnvelope = { summary: '', recent: [], last_answer: '' }
 
 /** HTTP 非 localhost 下 crypto.randomUUID 不可用，需兜底 */
 function newTurnId(): string {

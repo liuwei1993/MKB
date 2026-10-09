@@ -13,6 +13,8 @@ from .rag import build_chunks, format_rag_evidence, retrieve_chunks
 
 SUMMARY_MAX_CHARS = 800
 EXCERPT_MAX_CHARS = 500
+# Keep enough of the latest answer for rephrase (shorten/translate); not for retrieval.
+LAST_ANSWER_MAX_CHARS = 12000
 RECENT_MAX_TURNS = 3
 QUESTION_MAX_CHARS = 4000
 
@@ -46,7 +48,7 @@ ANSWER_SYSTEM = """你是医学文献助手。仅依据用户提供的文献检�
 
 REPHRASE_SYSTEM = """你是医学文献助手。用户希望改写上一轮回答（缩短、翻译或换说法）。本轮没有新的文献检索。
 要求：
-1. 只依据给出的上一轮问答摘录改写，不要补充摘录中没有的事实、数据或 PMID。
+1. 只依据给出的上一轮完整回答改写，不要补充其中没有的事实、数据或 PMID。
 2. 用中文；若用户明确要求翻译，则按用户要求的语言。
 3. 开头明确说明：本轮未重新检索文献，内容来自上一轮回答的改写。
 4. 声明：回答仅供科研与学习参考，不能替代临床诊疗决策。"""
@@ -65,7 +67,7 @@ def _clip(text: str, limit: int) -> str:
 
 
 def empty_context() -> dict[str, Any]:
-    return {"summary": "", "recent": []}
+    return {"summary": "", "recent": [], "last_answer": ""}
 
 
 def normalize_context(raw: dict | None) -> dict[str, Any]:
@@ -73,6 +75,7 @@ def normalize_context(raw: dict | None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return empty_context()
     summary = _clip(str(raw.get("summary") or ""), SUMMARY_MAX_CHARS)
+    last_answer = _clip(str(raw.get("last_answer") or ""), LAST_ANSWER_MAX_CHARS)
     recent_in = raw.get("recent") or []
     recent: list[dict[str, Any]] = []
     if isinstance(recent_in, list):
@@ -94,7 +97,11 @@ def normalize_context(raw: dict | None) -> dict[str, Any]:
                 recent.append(
                     {"question": question, "excerpt": excerpt, "pmids": pmids}
                 )
-    return {"summary": summary, "recent": recent[-RECENT_MAX_TURNS:]}
+    return {
+        "summary": summary,
+        "recent": recent[-RECENT_MAX_TURNS:],
+        "last_answer": last_answer,
+    }
 
 
 def extract_pmids(text: str) -> list[str]:
@@ -272,7 +279,11 @@ async def update_envelope(
             summary = naive_summary(summary, oldest)
         recent = recent[1:]
     recent.append(new_turn)
-    return {"summary": summary, "recent": recent}
+    return {
+        "summary": summary,
+        "recent": recent,
+        "last_answer": _clip(answer, LAST_ANSWER_MAX_CHARS),
+    }
 
 
 def format_evidence_fallback(articles: list[Article], max_chars: int) -> str:
@@ -325,12 +336,16 @@ def _answer_user_message(
 
 def _rephrase_user_message(question: str, ctx: dict[str, Any]) -> str:
     prior = previous_turn(ctx)
-    if prior is None:
+    if prior is None and not str(ctx.get("last_answer") or "").strip():
         return f"用户本轮要求：\n{question}\n\n（没有上一轮回答可改写。）"
+    prior_answer = str(ctx.get("last_answer") or "").strip() or str(
+        (prior or {}).get("excerpt") or ""
+    ).strip()
+    prior_q = str((prior or {}).get("question") or "").strip()
     return (
         f"用户本轮要求：\n{question}\n\n"
-        f"上一轮问题：\n{prior.get('question') or ''}\n\n"
-        f"上一轮回答摘录：\n{prior.get('excerpt') or '（无）'}\n"
+        f"上一轮问题：\n{prior_q or '（无）'}\n\n"
+        f"上一轮完整回答：\n{prior_answer or '（无）'}\n"
     )
 
 

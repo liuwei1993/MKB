@@ -30,6 +30,8 @@ class RecentTurn(BaseModel):
 class ContextIn(BaseModel):
     summary: str = Field(default="", max_length=2000)
     recent: list[RecentTurn] = Field(default_factory=list, max_length=6)
+    # Latest full answer for rephrase turns (shorten/translate); not used for retrieval.
+    last_answer: str = Field(default="", max_length=20000)
 
 
 class AskRequest(BaseModel):
