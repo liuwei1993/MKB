@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { carryEvidence, type ChatTurn } from './src/history.ts'
+import { carryEvidence, loadSessions, STORAGE_KEY, type ChatTurn } from './src/history.ts'
 
 function turn(id: string, articles: ChatTurn['articles'] = []): ChatTurn {
   return {
@@ -47,5 +47,50 @@ describe('carryEvidence', () => {
   it('leaves the only turn unchanged', () => {
     const only = [turn('a')]
     assert.equal(carryEvidence(only, 'a'), only)
+  })
+})
+
+describe('loadSessions', () => {
+  it('marks a mid-stream turn stopped and drops a corrupt article', () => {
+    const store = new Map<string, string>()
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          store.set(key, value)
+        },
+      },
+    })
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: 's',
+          title: '营养',
+          updatedAt: 1,
+          context: { summary: '', recent: [] },
+          turns: [
+            {
+              id: 'done',
+              question: '完成',
+              answer: '正文',
+              phase: 'done',
+              articles: [{ pmid: '1', title: 'T' }, 'bad'],
+              passages: [{ pmid: '1', text: '段' }, { pmid: '1' }],
+            },
+            { id: 'partial', question: '中断', answer: '半截', phase: 'answer' },
+            { id: 'failed', question: '失败', answer: '', phase: 'search', error: '请求失败' },
+          ],
+        },
+      ]),
+    )
+    const [session] = loadSessions()
+    assert.equal(session?.turns[0]?.stopped, false)
+    assert.equal(session?.turns[0]?.articles.length, 1)
+    assert.equal(session?.turns[0]?.passages.length, 1)
+    assert.equal(session?.turns[1]?.stopped, true)
+    assert.equal(session?.turns[2]?.stopped, false)
+    assert.equal(session?.turns[2]?.error, '请求失败')
   })
 })

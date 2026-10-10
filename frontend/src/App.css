@@ -295,6 +295,7 @@
   height: 100%;
   overflow: auto;
   padding: 8px 28px 28px;
+  scrollbar-gutter: stable;
 }
 
 .turn {
@@ -360,7 +361,8 @@
   font-size: 0.9rem;
 }
 
-.steps li.wait {
+.steps li.wait,
+.steps li.skip {
   color: var(--muted);
 }
 
@@ -397,6 +399,11 @@
   border-color: var(--danger);
   background: var(--danger);
   color: #fff;
+}
+
+.mark.skip {
+  border-style: dashed;
+  background: transparent;
 }
 
 .step-detail {
@@ -707,6 +714,7 @@
 .hero .composer,
 .composer-dock .composer {
   width: min(800px, 100%);
+  min-width: 0;
 }
 
 .ask-card {
@@ -777,7 +785,11 @@
 }
 
 .composer-dock {
-  padding: 0 24px 4px;
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+  padding: 0 28px 4px;
+  scrollbar-gutter: stable;
 }
 
 .composer {

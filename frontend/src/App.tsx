@@ -311,12 +311,7 @@ function AnswerBody({ text, onCite }: { text: string; onCite: (pmid: string) => 
 function PhaseStepper({ turn, loading }: { turn: ChatTurn; loading: boolean }) {
   const [open, setOpen] = useState(true)
   const current = phaseIndex(turn.phase)
-  const finished =
-    !loading &&
-    !turn.error &&
-    !turn.stopped &&
-    current === STEPS.length - 1 &&
-    (turn.phase === 'done' || turn.answer.length > 0)
+  const finished = !loading && !turn.error && !turn.stopped && turn.phase === 'done'
   const head = finished ? '循证思考完成' : turn.stopped ? '已停止' : turn.error ? '出错了' : '循证思考中'
 
   return (
@@ -328,8 +323,13 @@ function PhaseStepper({ turn, loading }: { turn: ChatTurn; loading: boolean }) {
       {open && (
         <ol className="steps">
           {STEPS.map((step, index) => {
-            const state = stepState(index, current, loading, turn.stopped, Boolean(turn.error))
-            const suffix = state === 'done' ? '完成' : state === 'active' ? '中' : ''
+            const skipped =
+              turn.retrieval === false && (step.key === 'search' || step.key === 'evidence')
+            const state = skipped
+              ? 'skip'
+              : stepState(index, current, loading, turn.stopped, Boolean(turn.error))
+            const suffix =
+              state === 'done' ? '完成' : state === 'active' ? '中' : state === 'skip' ? '（未进行）' : ''
             const detail =
               state === 'active' && loading
                 ? turn.status || (step.key === 'answer' ? '正在生成回答…' : '')
@@ -808,6 +808,8 @@ function App() {
       }
 
       let titleTranslationStarted = false
+      let sawDone = false
+      let sawError = false
       const patch = (partial: Partial<ChatTurn>, context?: ContextEnvelope) => {
         if (!alive()) return
         patchSession(sessionId!, turnId, partial, context)
@@ -858,15 +860,16 @@ function App() {
                 retrieval,
                 phase: retrieval ? 'search' : 'passages',
               }
-              let carried: ArticleMeta[] = []
+              const knownTurns =
+                sessionsRef.current.find((session) => session.id === sessionId)?.turns ?? []
+              const carried = retrieval
+                ? []
+                : (carryEvidence(knownTurns, turnId).find((item) => item.id === turnId)?.articles ?? [])
               if (!alive()) return
               setSessions((prev) =>
                 prev.map((session) => {
                   if (session.id !== sessionId) return session
                   const nextTurns = retrieval ? session.turns : carryEvidence(session.turns, turnId)
-                  if (!retrieval) {
-                    carried = nextTurns.find((item) => item.id === turnId)?.articles ?? []
-                  }
                   return {
                     ...session,
                     updatedAt: Date.now(),
@@ -940,11 +943,16 @@ function App() {
                 patch({}, next)
               }
             } else if (type === 'error') {
+              sawError = true
               patch({ error: String(event.message || '未知错误'), status: '' })
             } else if (type === 'done') {
+              sawDone = true
               patch({ status: '', phase: 'done' })
             }
           }
+        }
+        if (alive() && !sawDone && !sawError) {
+          patch({ stopped: true, status: '' })
         }
       } catch (error) {
         if (!alive()) return
@@ -975,9 +983,9 @@ function App() {
   const openSession = useCallback(
     (id: string) => {
       const switching = activeIdRef.current !== id
-      if (loadingRef.current) stop()
       setSidebarOpen(false)
       if (!switching) return
+      if (loadingRef.current) stop()
       const session = sessionsRef.current.find((item) => item.id === id)
       if (!session) return
       activeIdRef.current = id

@@ -150,7 +150,8 @@ export function IconSearch(props: IconProps) {
 export function IconSpark(props: IconProps) {
   return (
     <svg {...svg({ fill: 'currentColor', stroke: 'none', ...props })}>
-      <path d="M12 2.8 13.6 9 20 10.4 13.6 11.8 12 18l-1.6-6.2L4 10.4 10.4 9z" />
+      <path d="M12 2.2c.45 3.1 1.5 4.7 4.7 5.8-3.2 1.1-4.25 2.7-4.7 5.8-.45-3.1-1.5-4.7-4.7-5.8 3.2-1.1 4.25-2.7 4.7-5.8z" />
+      <path d="M18.1 13.4c.2 1.2.55 1.85 1.7 2.2-1.15.35-1.5 1-1.7 2.2-.2-1.2-.55-1.85-1.7-2.2 1.15-.35 1.5-1 1.7-2.2z" />
     </svg>
   )
 }

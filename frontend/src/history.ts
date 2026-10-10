@@ -68,6 +68,23 @@ function asContext(value: unknown): ContextEnvelope {
   }
 }
 
+function storedArticles(value: unknown): ArticleMeta[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is ArticleMeta => {
+    if (!item || typeof item !== 'object') return false
+    return typeof (item as ArticleMeta).pmid === 'string'
+  })
+}
+
+function storedPassages(value: unknown): Passage[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is Passage => {
+    if (!item || typeof item !== 'object') return false
+    const passage = item as Passage
+    return typeof passage.pmid === 'string' && typeof passage.text === 'string'
+  })
+}
+
 function normalizeTurn(value: unknown): ChatTurn | null {
   if (!value || typeof value !== 'object') return null
   const raw = value as Partial<ChatTurn>
@@ -75,9 +92,8 @@ function normalizeTurn(value: unknown): ChatTurn | null {
   const answer = typeof raw.answer === 'string' ? raw.answer : ''
   const phase = typeof raw.phase === 'string' && raw.phase ? raw.phase : 'done'
   const error = typeof raw.error === 'string' ? raw.error : ''
-  let stopped = Boolean(raw.stopped)
-  if (!stopped && !error && phase !== 'done' && phase !== 'answer') stopped = true
-  if (!stopped && !error && phase === 'answer' && !answer) stopped = true
+  // A finished turn always stores phase "done". Anything else was saved mid-stream.
+  const stopped = Boolean(raw.stopped) || (!error && phase !== 'done')
   return {
     id: raw.id,
     question: raw.question,
@@ -88,8 +104,8 @@ function normalizeTurn(value: unknown): ChatTurn | null {
     standalone: typeof raw.standalone === 'string' ? raw.standalone : '',
     relation: typeof raw.relation === 'string' ? raw.relation : '',
     retrieval: typeof raw.retrieval === 'boolean' ? raw.retrieval : null,
-    articles: Array.isArray(raw.articles) ? raw.articles : [],
-    passages: Array.isArray(raw.passages) ? raw.passages : [],
+    articles: storedArticles(raw.articles),
+    passages: storedPassages(raw.passages),
     suggestions: Array.isArray(raw.suggestions)
       ? raw.suggestions.filter((item): item is string => typeof item === 'string')
       : [],
