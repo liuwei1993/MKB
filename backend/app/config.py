@@ -18,7 +18,7 @@ class Settings(BaseModel):
 
     pubmed_timeout: float = 30.0
     llm_timeout: float = 120.0
-    target_pmids: int = 50
+    target_pmids: int = 100
     retmax_per_query: int = 25
     abstract_max_chars: int = 1200
 
@@ -37,6 +37,7 @@ def get_settings() -> Settings:
         embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-v3"),
         ncbi_email=os.getenv("NCBI_EMAIL", ""),
         ncbi_api_key=os.getenv("NCBI_API_KEY", ""),
+        target_pmids=int(os.getenv("TARGET_PMIDS", "100")),
         fulltext_max_articles=int(os.getenv("FULLTEXT_MAX_ARTICLES", "10")),
         fulltext_max_chars=int(os.getenv("FULLTEXT_MAX_CHARS", "80000")),
         rag_top_k=int(os.getenv("RAG_TOP_K", "12")),

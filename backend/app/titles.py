@@ -7,7 +7,7 @@ import re
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 15
-MAX_ARTICLES = 50
+MAX_ARTICLES = 100
 
 _HAN = re.compile(r"[\u4e00-\u9fff]")
 

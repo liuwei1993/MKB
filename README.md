@@ -5,7 +5,7 @@
 ## 功能
 
 1. 将中文问题改写为英文 PubMed 检索式  
-2. 检索约 40–50 篇相关文献并拉取摘要（含 PMCID / DOI）  
+2. 检索约 100 篇相关文献并拉取摘要（含 PMCID / DOI）  
 3. 对可获取的 PMC Open Access 全文分块，经 embedding 检索 top-k 段落  
 4. 大模型基于检索段落流式综合作答，并标注 `[PMID:…]`  
 5. 页面依据文献优先跳转 PMC 全文 / DOI / PubMed  
@@ -32,7 +32,7 @@ cp .env.example .env
 | `NCBI_EMAIL` | NCBI 联系邮箱 |
 | `NCBI_API_KEY` | NCBI API Key |
 
-可选（有默认值）：`FULLTEXT_MAX_ARTICLES`（10）、`RAG_TOP_K`（12）、`CHUNK_SIZE`、`CHUNK_OVERLAP`、`FULLTEXT_MAX_CHARS`。
+可选（有默认值）：`TARGET_PMIDS`（100）、`FULLTEXT_MAX_ARTICLES`（10）、`RAG_TOP_K`（12）、`CHUNK_SIZE`、`CHUNK_OVERLAP`、`FULLTEXT_MAX_CHARS`。
 
 ## 启动
 
