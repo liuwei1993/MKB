@@ -136,6 +136,20 @@
   cursor: not-allowed;
 }
 
+.composer button.stop {
+  background: var(--ink);
+}
+
+.composer button.stop:hover {
+  background: #0f1f1b;
+}
+
+.stopped {
+  margin: 10px 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .examples {
   margin-top: 18px;
   display: flex;
@@ -272,6 +286,15 @@
 .cite-dialog-head h2 {
   margin: 0;
   font-size: 1.05rem;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.cite-translating {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--muted);
 }
 
 .cite-dialog-close {
@@ -305,6 +328,12 @@
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 12px 14px;
+}
+
+.citations .title-zh {
+  font-weight: 600;
+  font-size: 0.92rem;
+  margin: 0 0 2px;
 }
 
 .citations .title {

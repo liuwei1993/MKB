@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import get_settings
+from .llm import LLMClient
 from .pipeline import run_ask
+from .titles import translate_titles
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="MKB PubMed Q&A", version="0.1.0")
 
@@ -39,6 +44,15 @@ class AskRequest(BaseModel):
     context: ContextIn | None = None
 
 
+class TitleIn(BaseModel):
+    pmid: str = Field(..., min_length=1, max_length=32)
+    title: str = Field(default="", max_length=2000)
+
+
+class TranslateTitlesRequest(BaseModel):
+    articles: list[TitleIn] = Field(default_factory=list, max_length=50)
+
+
 @app.get("/api/health")
 async def health():
     s = get_settings()
@@ -56,14 +70,35 @@ async def health():
     }
 
 
+@app.post("/api/translate-titles")
+async def translate_titles_api(body: TranslateTitlesRequest):
+    settings = get_settings()
+    try:
+        async with LLMClient(settings) as llm:
+            titles = await translate_titles(
+                llm, [item.model_dump() for item in body.articles]
+            )
+    except Exception:
+        logger.warning("title translation failed", exc_info=True)
+        titles = {}
+    return {"titles": titles}
+
+
 @app.post("/api/ask")
-async def ask(body: AskRequest):
+async def ask(body: AskRequest, request: Request):
     settings = get_settings()
 
     async def event_stream():
         context = body.context.model_dump() if body.context else None
-        async for event in run_ask(settings, body.question, context):
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        agen = run_ask(settings, body.question, context)
+        try:
+            async for event in agen:
+                # 客户端已断开时立刻结束生成，避免模型继续输出。
+                if await request.is_disconnected():
+                    return
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            await agen.aclose()
 
     return StreamingResponse(
         event_stream(),
