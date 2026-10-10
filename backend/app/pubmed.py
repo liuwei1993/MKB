@@ -21,6 +21,7 @@ class Article:
     authors: str
     pmcid: str = ""
     doi: str = ""
+    pub_types: list[str] = field(default_factory=list)
     has_fulltext: bool = False
     fulltext: str = field(default="", repr=False)
 
@@ -50,6 +51,7 @@ class Article:
             "url_label": url_label,
             "has_abstract": bool(self.abstract.strip()),
             "has_fulltext": self.has_fulltext,
+            "pub_types": list(self.pub_types),
         }
 
     def to_dict(self) -> dict:
@@ -208,6 +210,11 @@ def _parse_pubmed_xml(xml_text: str) -> list[Article]:
         if len(article.findall("AuthorList/Author")) > 3:
             authors = f"{authors} et al." if authors else "et al."
         pmcid, doi = _parse_ids(art)
+        pub_types: list[str] = []
+        for node in article.findall("PublicationTypeList/PublicationType"):
+            label = _text(node)
+            if label and label not in pub_types:
+                pub_types.append(label)
         out.append(
             Article(
                 pmid=pmid,
@@ -218,6 +225,7 @@ def _parse_pubmed_xml(xml_text: str) -> list[Article]:
                 authors=authors,
                 pmcid=pmcid,
                 doi=doi,
+                pub_types=pub_types,
             )
         )
     return out

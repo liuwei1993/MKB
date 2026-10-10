@@ -9,7 +9,7 @@ from .config import Settings
 from .llm import LLMClient
 from .pmc import PMCClient
 from .pubmed import Article, PubMedClient
-from .rag import build_chunks, format_rag_evidence, retrieve_chunks
+from .rag import Chunk, build_chunks, format_rag_evidence, retrieve_chunks
 
 SUMMARY_MAX_CHARS = 800
 EXCERPT_MAX_CHARS = 500
@@ -44,7 +44,18 @@ ANSWER_SYSTEM = """你是医学文献助手。仅依据用户提供的文献检�
 4. 如证据冲突或不足，明确说明局限。
 5. 若消息中有「上一轮摘录」，只用于对比或衔接，不得将其 PMID 当作本轮证据，除非该 PMID 也出现在本轮文献证据中。
 6. 末尾用一两句总结临床/科研含义。
-7. 声明：回答仅供科研与学习参考，不能替代临床诊疗决策。"""
+7. 声明：回答仅供科研与学习参考，不能替代临床诊疗决策。
+8. 适合对照或罗列成分、指标时使用 Markdown 表格。
+9. 引用格式只能是 [PMID:数字]，不要改成脚注序号或其他写法。"""
+
+SUGGEST_SYSTEM = """根据本轮医学问答，提出用户可能接着追问的问题。
+只返回 JSON，不要 markdown，不要解释：
+{"questions":["...","...","..."]}
+规则：
+- 最多 3 个中文问题。
+- 每个问题必须能从本轮回答接着问，不要换成无关疾病、药物或人群。
+- 每个问题不超过 40 个字。
+- 不要重复本轮已经问过的原话。"""
 
 REPHRASE_SYSTEM = """你是医学文献助手。用户希望改写上一轮回答（缩短、翻译或换说法）。本轮没有新的文献检索。
 要求：
@@ -102,6 +113,10 @@ def normalize_context(raw: dict | None) -> dict[str, Any]:
         "recent": recent[-RECENT_MAX_TURNS:],
         "last_answer": last_answer,
     }
+
+
+def _status(message: str, phase: str) -> dict[str, str]:
+    return {"type": "status", "message": message, "phase": phase}
 
 
 def extract_pmids(text: str) -> list[str]:
@@ -286,6 +301,64 @@ async def update_envelope(
     }
 
 
+def parse_suggestions(raw: str) -> list[str]:
+    data = _extract_json_obj(raw) or {}
+    raw_questions = data.get("questions")
+    if not isinstance(raw_questions, list):
+        return []
+    out: list[str] = []
+    for item in raw_questions:
+        question = _clip(str(item).strip(), 80)
+        if question and question not in out:
+            out.append(question)
+        if len(out) >= 3:
+            break
+    return out
+
+
+async def suggest_followups(llm: LLMClient, question: str, answer: str) -> list[str]:
+    answer = (answer or "").strip()
+    if not answer:
+        return []
+    raw = await llm.chat(
+        [
+            {"role": "system", "content": SUGGEST_SYSTEM},
+            {
+                "role": "user",
+                "content": (
+                    f"本轮问题：\n{_clip(question, QUESTION_MAX_CHARS)}\n\n"
+                    f"本轮回答：\n{_clip(answer, 4000)}"
+                ),
+            },
+        ],
+        max_tokens=300,
+        temperature=0.3,
+    )
+    return parse_suggestions(raw)
+
+
+def passage_items(chunks: list[Chunk]) -> list[dict[str, str]]:
+    return [
+        {"pmid": chunk.pmid, "source": chunk.source, "text": chunk.text}
+        for chunk in chunks
+        if chunk.pmid and chunk.text.strip()
+    ]
+
+
+def passage_items_from_articles(
+    articles: list[Article], max_chars: int
+) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for article in articles:
+        text = article.abstract.strip()
+        if not text:
+            continue
+        if len(text) > max_chars:
+            text = text[: max_chars - 1] + "…"
+        items.append({"pmid": article.pmid, "source": "abstract", "text": text})
+    return items
+
+
 def format_evidence_fallback(articles: list[Article], max_chars: int) -> str:
     """Abstract-only evidence when RAG/embedding fails."""
     blocks: list[str] = []
@@ -368,7 +441,7 @@ async def run_ask(
     await pmc.__aenter__()
     try:
         try:
-            yield {"type": "status", "message": "正在结合对话理解问题…"}
+            yield _status("正在结合对话理解问题…", "understand")
             understood = await understand_turn(llm, question, ctx)
             relation = understood["relation"]
             standalone = understood["standalone_question"]
@@ -387,10 +460,7 @@ async def run_ask(
             fulltext_n = 0
             with_abs = 0
             if relation == "rephrase":
-                yield {
-                    "type": "status",
-                    "message": "本轮为改写上一回答，不重新检索…",
-                }
+                yield _status("本轮为改写上一回答，不重新检索…", "passages")
             else:
                 async for event in _retrieve_evidence(
                     settings, llm, pubmed, pmc, standalone, queries
@@ -430,7 +500,7 @@ async def run_ask(
                     },
                 ]
 
-            yield {"type": "status", "message": "正在整理回答…"}
+            yield _status("正在整理回答…", "answer")
             answer_parts: list[str] = []
             async for token in llm.chat_stream(
                 messages,
@@ -440,10 +510,17 @@ async def run_ask(
                 answer_parts.append(token)
                 yield {"type": "token", "content": token}
 
+            answer_text = "".join(answer_parts)
             if len(ctx.get("recent") or []) >= RECENT_MAX_TURNS:
-                yield {"type": "status", "message": "正在压缩更早的对话…"}
-            new_ctx = await update_envelope(llm, ctx, question, "".join(answer_parts))
+                yield _status("正在压缩更早的对话…", "answer")
+            new_ctx = await update_envelope(llm, ctx, question, answer_text)
             yield {"type": "context", "context": new_ctx}
+            try:
+                questions = await suggest_followups(llm, question, answer_text)
+            except Exception:
+                questions = []
+            if questions:
+                yield {"type": "suggestions", "questions": questions}
             yield {"type": "done"}
         except Exception as e:
             yield {"type": "error", "message": str(e)}
@@ -461,7 +538,7 @@ async def _retrieve_evidence(
     standalone: str,
     queries: list[str],
 ) -> AsyncIterator[dict[str, Any]]:
-    yield {"type": "status", "message": "正在检索 PubMed…"}
+    yield _status("正在检索 PubMed…", "search")
     articles = await pubmed.search_articles(queries)
     if not articles:
         yield {
@@ -476,7 +553,7 @@ async def _retrieve_evidence(
         "count": len(articles),
     }
 
-    yield {"type": "status", "message": "正在获取开放获取全文…"}
+    yield _status("正在获取开放获取全文…", "fulltext")
     fulltext_n = await pmc.attach_fulltexts(articles)
 
     yield {
@@ -487,15 +564,16 @@ async def _retrieve_evidence(
 
     with_abs = sum(1 for a in articles if a.abstract.strip())
     if fulltext_n == 0 and with_abs == 0:
-        yield {
-            "type": "status",
-            "message": "无全文且无摘要，将仅依据标题等信息作答（证据有限）。",
-        }
+        yield _status(
+            "无全文且无摘要，将仅依据标题等信息作答（证据有限）。",
+            "fulltext",
+        )
 
     evidence: str
     used_rag = False
+    top: list[Chunk] = []
     try:
-        yield {"type": "status", "message": "正在检索相关段落…"}
+        yield _status("正在检索相关段落…", "passages")
         chunks = build_chunks(
             articles,
             chunk_size=settings.chunk_size,
@@ -508,19 +586,26 @@ async def _retrieve_evidence(
         evidence = format_rag_evidence(top, articles)
         used_rag = True
         ft_chunks = sum(1 for c in top if c.source == "fulltext")
-        yield {
-            "type": "status",
-            "message": (
+        yield _status(
+            (
                 f"已获取 {fulltext_n} 篇全文，选用 {len(top)} 个段落"
                 f"（其中全文段落 {ft_chunks}），正在整理回答…"
             ),
-        }
+            "passages",
+        )
     except Exception as rag_err:
-        yield {
-            "type": "status",
-            "message": f"段落检索失败，回退摘要作答（{rag_err}）…",
-        }
+        yield _status(f"段落检索失败，回退摘要作答（{rag_err}）…", "passages")
         evidence = format_evidence_fallback(articles, settings.abstract_max_chars)
+
+    if used_rag:
+        yield {"type": "passages", "items": passage_items(top)}
+    else:
+        yield {
+            "type": "passages",
+            "items": passage_items_from_articles(
+                articles, settings.abstract_max_chars
+            ),
+        }
 
     yield {
         "type": "_evidence",
