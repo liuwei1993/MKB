@@ -66,6 +66,7 @@ function isNearAnchor(anchor: HTMLElement | null): boolean {
 
 function nestedScrollerConsumes(target: EventTarget | null, deltaY: number): boolean {
   if (!(target instanceof Element)) return false
+  if (target.closest('.cite-dialog')) return true
   let node: Element | null = target
   while (node && node !== document.body && node !== document.documentElement) {
     if (node instanceof HTMLElement) {
@@ -125,33 +126,30 @@ function App() {
   const loadingRef = useRef(false)
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const followBottomRef = useRef(true)
-  const userPinnedRef = useRef(true)
-  const gestureStartedNearRef = useRef(true)
   const userScrollingRef = useRef(false)
+  const sawUserScrollRef = useRef(false)
   const gestureStartYRef = useRef(0)
-  const programmaticRef = useRef(false)
+  const lastScrollYRef = useRef(0)
+  const programmaticYRef = useRef<number | null>(null)
   const scrollIdleRef = useRef<number | null>(null)
   const citeTurn = turns.find((t) => t.id === citeTurnId)
 
   const scrollToBottom = useCallback(() => {
     const anchor = bottomRef.current
-    if (!anchor || isNearAnchor(anchor)) return
-    const before = window.scrollY
-    programmaticRef.current = true
-    anchor.scrollIntoView({ behavior: 'auto', block: 'end' })
-    if (Math.abs(window.scrollY - before) <= 1) {
-      programmaticRef.current = false
+    if (!anchor || userScrollingRef.current || !followBottomRef.current || isNearAnchor(anchor)) {
       return
     }
-    requestAnimationFrame(() => {
-      programmaticRef.current = false
-    })
+    const before = window.scrollY
+    anchor.scrollIntoView({ behavior: 'auto', block: 'end' })
+    const after = window.scrollY
+    if (Math.abs(after - before) > 1) programmaticYRef.current = after
   }, [])
 
   const stickToBottom = useCallback(() => {
     followBottomRef.current = true
-    userPinnedRef.current = true
     userScrollingRef.current = false
+    sawUserScrollRef.current = false
+    programmaticYRef.current = null
     if (scrollIdleRef.current != null) {
       window.clearTimeout(scrollIdleRef.current)
       scrollIdleRef.current = null
@@ -165,64 +163,74 @@ function App() {
   }, [context])
 
   useEffect(() => {
+    lastScrollYRef.current = window.scrollY
+
+    const clearIdle = () => {
+      if (scrollIdleRef.current != null) {
+        window.clearTimeout(scrollIdleRef.current)
+        scrollIdleRef.current = null
+      }
+    }
+
     const armIdle = () => {
-      if (scrollIdleRef.current != null) window.clearTimeout(scrollIdleRef.current)
+      clearIdle()
       scrollIdleRef.current = window.setTimeout(() => {
         scrollIdleRef.current = null
+        const movedByPosition = Math.abs(window.scrollY - gestureStartYRef.current) > 2
+        const hadUserScrollEvent = sawUserScrollRef.current
+        const userMoved = hadUserScrollEvent || movedByPosition
         userScrollingRef.current = false
-        const moved = Math.abs(window.scrollY - gestureStartYRef.current) > 2
-        followBottomRef.current = moved
-          ? userPinnedRef.current
-          : gestureStartedNearRef.current
+        sawUserScrollRef.current = false
+        if (!userMoved) return
+        if (!hadUserScrollEvent) followBottomRef.current = isNearAnchor(bottomRef.current)
         if (followBottomRef.current) scrollToBottom()
       }, USER_SCROLL_IDLE_MS)
     }
 
-    const beginGesture = () => {
-      if (userScrollingRef.current) return
-      gestureStartYRef.current = window.scrollY
-      gestureStartedNearRef.current = isNearAnchor(bottomRef.current)
+    const beginSuppress = () => {
+      if (!userScrollingRef.current) {
+        gestureStartYRef.current = window.scrollY
+        sawUserScrollRef.current = false
+      }
       userScrollingRef.current = true
-    }
-
-    const rememberPin = () => {
-      const near = isNearAnchor(bottomRef.current)
-      userPinnedRef.current = near
-      if (!near) followBottomRef.current = false
+      armIdle()
     }
 
     const onWheel = (event: WheelEvent) => {
       if (nestedScrollerConsumes(event.target, event.deltaY)) return
-      beginGesture()
-      armIdle()
-      requestAnimationFrame(() => {
-        if (!userScrollingRef.current) return
-        if (Math.abs(window.scrollY - gestureStartYRef.current) <= 2) return
-        rememberPin()
-      })
+      beginSuppress()
     }
 
     const onTouchMove = (event: TouchEvent) => {
-      if (nestedScrollerConsumes(event.target, -1) || nestedScrollerConsumes(event.target, 1)) return
-      beginGesture()
-      armIdle()
+      const target = event.target
+      if (nestedScrollerConsumes(target, -1) || nestedScrollerConsumes(target, 1)) return
+      beginSuppress()
     }
 
     const onScroll = () => {
-      if (programmaticRef.current) return
-      beginGesture()
-      rememberPin()
+      const y = window.scrollY
+      const moved = Math.abs(y - lastScrollYRef.current) > 2
+      lastScrollYRef.current = y
+      if (programmaticYRef.current != null && Math.abs(y - programmaticYRef.current) <= 2) {
+        programmaticYRef.current = null
+        return
+      }
+      programmaticYRef.current = null
+      if (!moved) return
+      sawUserScrollRef.current = true
+      userScrollingRef.current = true
+      followBottomRef.current = isNearAnchor(bottomRef.current)
       armIdle()
     }
 
     window.addEventListener('wheel', onWheel, { passive: true })
     window.addEventListener('touchmove', onTouchMove, { passive: true })
-    window.addEventListener('scroll', onScroll, { passive: true })
+    document.addEventListener('scroll', onScroll, { passive: true, capture: true })
     return () => {
       window.removeEventListener('wheel', onWheel)
       window.removeEventListener('touchmove', onTouchMove)
-      window.removeEventListener('scroll', onScroll)
-      if (scrollIdleRef.current != null) window.clearTimeout(scrollIdleRef.current)
+      document.removeEventListener('scroll', onScroll, { capture: true })
+      clearIdle()
     }
   }, [scrollToBottom])
 
