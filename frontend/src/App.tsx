@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import { contextAfterStop } from './stopContext'
 import './App.css'
 
 type ArticleMeta = {
@@ -52,40 +53,6 @@ const EXAMPLES = [
 ]
 
 const EMPTY_CONTEXT: ContextEnvelope = { summary: '', recent: [], last_answer: '' }
-const RECENT_MAX_TURNS = 3
-const EXCERPT_MAX_CHARS = 500
-const LAST_ANSWER_MAX_CHARS = 12000
-
-function pmidsIn(text: string): string[] {
-  const found: string[] = []
-  const re = /PMID\s*[:：]?\s*(\d{4,10})/gi
-  for (const match of text.matchAll(re)) {
-    const pmid = match[1]
-    if (!pmid || found.includes(pmid)) continue
-    found.push(pmid)
-    if (found.length >= 20) break
-  }
-  return found
-}
-
-/** 停止时服务端不会再下发 context，用已生成的文本补上这一轮。 */
-function contextAfterStop(
-  ctx: ContextEnvelope,
-  turn: { question: string; answer: string },
-): ContextEnvelope {
-  const answer = turn.answer.trim()
-  const excerpt = answer.slice(0, EXCERPT_MAX_CHARS)
-  const last = ctx.recent.at(-1)
-  if (last?.question === turn.question && last.excerpt === excerpt) return ctx
-  return {
-    summary: ctx.summary,
-    recent: [
-      ...ctx.recent,
-      { question: turn.question, excerpt, pmids: pmidsIn(answer) },
-    ].slice(-RECENT_MAX_TURNS),
-    last_answer: answer ? answer.slice(0, LAST_ANSWER_MAX_CHARS) : ctx.last_answer,
-  }
-}
 
 const HAN = /[\u4e00-\u9fff]/
 const NEAR_BOTTOM_PX = 16
@@ -336,6 +303,7 @@ function App() {
           const res = await fetch('/api/translate-titles', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
             body: JSON.stringify({
               articles: items.map((a) => ({ pmid: a.pmid, title: a.title })),
             }),
