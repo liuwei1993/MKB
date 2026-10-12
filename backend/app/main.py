@@ -15,6 +15,14 @@ from .titles import translate_titles
 
 logger = logging.getLogger(__name__)
 
+# uvicorn 只配置自己的 logger，根 logger 默认 WARNING，且 basicConfig 在已有 handler 时是空操作。
+# 显式把 backend 调到 INFO，评估日志才会进容器 stderr。
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logging.getLogger("backend").setLevel(logging.INFO)
+
 app = FastAPI(title="MKB PubMed Q&A", version="0.1.0")
 
 app.add_middleware(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+import time
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -9,6 +11,8 @@ import httpx
 
 from .config import Settings
 from .pubmed import Article, _normalize_pmcid
+
+logger = logging.getLogger(__name__)
 
 BIOC_BASE = "https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_json"
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -73,8 +77,11 @@ class PMCClient:
         Mutates articles in place. Returns count successfully fetched.
         """
         limit = self.settings.fulltext_max_articles
-        candidates = [a for a in articles if _normalize_pmcid(a.pmcid)][:limit]
+        all_with_pmcid = [a for a in articles if _normalize_pmcid(a.pmcid)]
+        candidates = all_with_pmcid[:limit]
+        t0 = time.perf_counter()
         if not candidates:
+            logger.info("pmc_fulltext candidates=0 limit=%d (无 PMCID 命中)", limit)
             return 0
 
         sem = asyncio.Semaphore(3)
@@ -93,7 +100,27 @@ class PMCClient:
                 return False
 
         results = await asyncio.gather(*(one(a) for a in candidates))
-        return sum(1 for r in results if r)
+        fetched = sum(1 for r in results if r)
+        total_chars = sum(len(a.fulltext) for a in candidates if a.has_fulltext)
+        elapsed = time.perf_counter() - t0
+        # 评估 FULLTEXT_MAX_ARTICLES：cap 被打满说明调大有收益空间
+        if len(all_with_pmcid) > limit:
+            logger.warning(
+                "pmc_fulltext cap 打满: 有 PMCID 的文章 %d 篇，仅抓取 %d 篇"
+                " (FULLTEXT_MAX_ARTICLES=%d)，调大该参数可覆盖更多全文",
+                len(all_with_pmcid), limit, limit,
+            )
+        logger.info(
+            "pmc_fulltext limit=%d candidates=%d fetched=%d failed=%d "
+            "fulltext_chars=%d elapsed=%.2fs",
+            limit,
+            len(candidates),
+            fetched,
+            len(candidates) - fetched,
+            total_chars,
+            elapsed,
+        )
+        return fetched
 
     async def _fetch_bioc(self, pmcid: str) -> str | None:
         assert self._client is not None

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
 
 import httpx
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
@@ -141,6 +144,7 @@ class PubMedClient:
             if len(seen) >= target:
                 break
             ids = await self.esearch(q, retmax=per)
+            logger.info("pubmed_esearch query=%r hits=%d", q, len(ids))
             for pmid in ids:
                 if pmid not in seen_set:
                     seen_set.add(pmid)
@@ -149,7 +153,15 @@ class PubMedClient:
                         break
             await asyncio.sleep(0.12)
 
-        return await self.efetch(seen)
+        articles = await self.efetch(seen)
+        logger.info(
+            "pubmed_fetch queries=%d unique_pmids=%d articles=%d "
+            "with_abstract=%d with_pmcid=%d",
+            len(queries), len(seen), len(articles),
+            sum(1 for a in articles if a.abstract.strip()),
+            sum(1 for a in articles if _normalize_pmcid(a.pmcid)),
+        )
+        return articles
 
 
 def _text(el: ET.Element | None) -> str:

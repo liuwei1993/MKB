@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 
 import numpy as np
 
 from .llm import LLMClient
 from .pubmed import Article
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -121,18 +125,43 @@ async def retrieve_chunks(
     if not chunks:
         return []
     if len(chunks) <= top_k:
+        logger.info(
+            "rag_retrieve chunks=%d <= top_k=%d 全部入选，未调用 embedding",
+            len(chunks), top_k,
+        )
         # Still embed? Not necessary — return all
         return chunks
 
     texts = [c.text for c in chunks]
     # Embed query + documents; query first for a single batched-style flow
+    t0 = time.perf_counter()
     q_vecs = await llm.embed([question])
     doc_vecs = await llm.embed(texts)
     q = np.asarray(q_vecs[0], dtype=np.float32)
     m = np.asarray(doc_vecs, dtype=np.float32)
     scores = _cosine_sim(q, m)
     order = np.argsort(-scores)[:top_k]
-    return [chunks[int(i)] for i in order]
+    picked = [chunks[int(i)] for i in order]
+    _log_score_curve(chunks, scores, top_k, time.perf_counter() - t0)
+    return picked
+
+
+def _log_score_curve(
+    chunks: list[Chunk], scores: np.ndarray, top_k: int, elapsed: float
+) -> None:
+    """打印 top_k 前后的相似度衰减，用于评估调大 RAG_TOP_K 的边际收益。"""
+    n = len(chunks)
+    k = min(top_k, n)
+    s_sorted = np.sort(scores)[::-1]
+    selected = np.argsort(-scores)[:k]
+    ft_sel = sum(1 for i in selected if chunks[int(i)].source == "fulltext")
+    after = [round(float(x), 4) for x in s_sorted[k : k + 5]]
+    logger.info(
+        "rag_retrieve chunks=%d top_k=%d selected_fulltext=%d/%d "
+        "score_top1=%.4f score_at_k=%.4f scores_after_k=%s elapsed=%.2fs",
+        n, k, ft_sel, k,
+        float(s_sorted[0]), float(s_sorted[k - 1]), after, elapsed,
+    )
 
 
 def format_rag_evidence(chunks: list[Chunk], articles: list[Article]) -> str:

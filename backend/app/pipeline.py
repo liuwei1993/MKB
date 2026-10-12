@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -10,6 +12,8 @@ from .llm import LLMClient
 from .pmc import PMCClient
 from .pubmed import Article, PubMedClient
 from .rag import Chunk, build_chunks, format_rag_evidence, retrieve_chunks
+
+logger = logging.getLogger(__name__)
 
 SUMMARY_MAX_CHARS = 800
 EXCERPT_MAX_CHARS = 500
@@ -439,10 +443,19 @@ async def run_ask(
     await llm.__aenter__()
     await pubmed.__aenter__()
     await pmc.__aenter__()
+    t_start = time.perf_counter()
+    timings: dict[str, float] = {}
     try:
         try:
+            t = time.perf_counter()
             yield _status("正在结合对话理解问题…", "understand")
             understood = await understand_turn(llm, question, ctx)
+            timings["understand_s"] = round(time.perf_counter() - t, 2)
+            logger.info(
+                "ask_understand relation=%s standalone=%r queries=%s elapsed=%.2fs",
+                understood["relation"], understood["standalone_question"],
+                understood["queries"], timings["understand_s"],
+            )
             relation = understood["relation"]
             standalone = understood["standalone_question"]
             queries = understood["queries"]
@@ -462,6 +475,7 @@ async def run_ask(
             if relation == "rephrase":
                 yield _status("本轮为改写上一回答，不重新检索…", "passages")
             else:
+                t = time.perf_counter()
                 async for event in _retrieve_evidence(
                     settings, llm, pubmed, pmc, standalone, queries
                 ):
@@ -474,7 +488,14 @@ async def run_ask(
                     else:
                         yield event
                         if event["type"] == "error":
+                            timings["retrieve_s"] = round(time.perf_counter() - t, 2)
+                            logger.info(
+                                "ask_abort phase=retrieve elapsed=%.2fs message=%s",
+                                timings["retrieve_s"],
+                                event.get("message"),
+                            )
                             return
+                timings["retrieve_s"] = round(time.perf_counter() - t, 2)
 
             if relation == "rephrase":
                 messages = [
@@ -502,6 +523,7 @@ async def run_ask(
 
             yield _status("正在整理回答…", "answer")
             answer_parts: list[str] = []
+            t = time.perf_counter()
             async for token in llm.chat_stream(
                 messages,
                 max_tokens=2048,
@@ -509,20 +531,47 @@ async def run_ask(
             ):
                 answer_parts.append(token)
                 yield {"type": "token", "content": token}
+            timings["answer_s"] = round(time.perf_counter() - t, 2)
 
             answer_text = "".join(answer_parts)
+            t = time.perf_counter()
             if len(ctx.get("recent") or []) >= RECENT_MAX_TURNS:
                 yield _status("正在压缩更早的对话…", "answer")
             new_ctx = await update_envelope(llm, ctx, question, answer_text)
+            timings["envelope_s"] = round(time.perf_counter() - t, 2)
             yield {"type": "context", "context": new_ctx}
+            t = time.perf_counter()
             try:
                 questions = await suggest_followups(llm, question, answer_text)
             except Exception:
                 questions = []
+            timings["suggest_s"] = round(time.perf_counter() - t, 2)
+            # 每轮一条汇总日志，用于评估 RAG_TOP_K / FULLTEXT_MAX_ARTICLES 的成本与收益
+            logger.info(
+                "ask_summary %s",
+                json.dumps(
+                    {
+                        "relation": relation,
+                        "evidence_mode": mode,
+                        "article_count": article_count,
+                        "fulltext_fetched": fulltext_n,
+                        "with_abstract": with_abs,
+                        "evidence_chars": len(evidence),
+                        "answer_chars": len(answer_text),
+                        "rag_top_k": settings.rag_top_k,
+                        "fulltext_max_articles": settings.fulltext_max_articles,
+                        "target_pmids": settings.target_pmids,
+                        "timings_s": timings,
+                        "total_s": round(time.perf_counter() - t_start, 2),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
             if questions:
                 yield {"type": "suggestions", "questions": questions}
             yield {"type": "done"}
         except Exception as e:
+            logger.error("ask_failed question=%r: %s", question, e, exc_info=True)
             yield {"type": "error", "message": str(e)}
     finally:
         await pmc.__aexit__(None, None, None)
@@ -580,6 +629,11 @@ async def _retrieve_evidence(
             chunk_overlap=settings.chunk_overlap,
             abstract_max_chars=settings.abstract_max_chars,
         )
+        ft_chunks = sum(1 for c in chunks if c.source == "fulltext")
+        logger.info(
+            "rag_chunks total=%d fulltext=%d abstract=%d",
+            len(chunks), ft_chunks, len(chunks) - ft_chunks,
+        )
         top = await retrieve_chunks(
             llm, standalone, chunks, top_k=settings.rag_top_k
         )
@@ -594,6 +648,7 @@ async def _retrieve_evidence(
             "passages",
         )
     except Exception as rag_err:
+        logger.warning("rag_fallback reason=%s", rag_err)
         yield _status(f"段落检索失败，回退摘要作答（{rag_err}）…", "passages")
         evidence = format_evidence_fallback(articles, settings.abstract_max_chars)
 
