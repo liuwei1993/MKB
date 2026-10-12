@@ -35,6 +35,7 @@ import {
 } from './history'
 import { pubTypeLabel } from './pubTypes'
 import { contextAfterStop, type ContextEnvelope } from './stopContext'
+import { postTitleBatch, runTitleTranslation, titleSlots } from './titleTranslation'
 import './App.css'
 
 const EXAMPLES = [
@@ -377,6 +378,7 @@ function RefCard({
   article,
   passages,
   active,
+  translating,
   onToggle,
 }: {
   turnId: string
@@ -385,10 +387,13 @@ function RefCard({
   article?: ArticleMeta
   passages: Passage[]
   active: boolean
+  translating: boolean
   onToggle: (pmid: string) => void
 }) {
   const label = pubTypeLabel(article?.pub_types)
   const cites = passages.length
+  const showPending =
+    translating && !article?.title_zh && needsTitleTranslation(article?.title || '')
   return (
     <article id={`ref-${turnId}-${pmid}`} className={active ? 'ref-card active' : 'ref-card'}>
       <div className="ref-kicker">
@@ -397,6 +402,7 @@ function RefCard({
       </div>
       <p className="title">{article?.title || `PMID:${pmid}`}</p>
       {article?.title_zh && <p className="title-zh">{article.title_zh}</p>}
+      {showPending && <p className="title-zh title-zh-pending">翻译中…</p>}
       {label && <span className="pub-type">{label}</span>}
       {article ? (
         <p className="meta">
@@ -458,6 +464,7 @@ function ReferenceList({
               article={item.article}
               passages={passagesFor(item.pmid)}
               active={activePmid === item.pmid}
+              translating={turn.titlesPending}
               onToggle={onToggle}
             />
           ))}
@@ -474,6 +481,7 @@ function ReferenceList({
               article={article}
               passages={passagesFor(article.pmid)}
               active={activePmid === article.pmid}
+              translating={turn.titlesPending}
               onToggle={onToggle}
             />
           ))}
@@ -604,6 +612,7 @@ function App() {
   const { threadRef, bottomRef, stick, away } = useThreadFollow(turns.length > 0, contentKey)
 
   const abortRef = useRef<AbortController | null>(null)
+  const titleAbortRef = useRef(new Map<string, AbortController>())
   const contextRef = useRef<ContextEnvelope>(EMPTY_CONTEXT)
   const sessionsRef = useRef(sessions)
   const turnsRef = useRef(turns)
@@ -692,6 +701,7 @@ function App() {
       if (!trimmed || loadingRef.current) return
 
       abortRef.current?.abort()
+      if (options?.replaceTurnId) titleAbortRef.current.get(options.replaceTurnId)?.abort()
       stick()
       const gen = ++askGen.current
       const controller = new AbortController()
@@ -760,8 +770,7 @@ function App() {
         })
       })
 
-      const applyTitles = (titles: Record<string, string>) => {
-        if (!alive()) return
+      const mergeTitleMap = (titles: Record<string, string>) => {
         setSessions((prev) =>
           prev.map((session) => {
             if (session.id !== sessionId) return session
@@ -769,42 +778,55 @@ function App() {
               ...session,
               turns: session.turns.map((item) => {
                 if (item.id !== turnId) return item
-                return {
-                  ...item,
-                  titlesPending: false,
-                  articles: item.articles.map((article) => {
-                    const zh = titles[article.pmid]?.trim()
-                    if (!zh || zh === article.title || !HAN.test(zh)) return article
-                    return { ...article, title_zh: zh }
-                  }),
-                }
+                let changed = false
+                const articles = item.articles.map((article) => {
+                  const raw = titles[article.pmid]
+                  const zh = typeof raw === 'string' ? raw.trim() : ''
+                  if (!zh || zh === article.title || zh === article.title_zh || !HAN.test(zh)) return article
+                  changed = true
+                  return { ...article, title_zh: zh }
+                })
+                return changed ? { ...item, articles } : item
               }),
             }
           }),
         )
       }
 
-      const requestTitleTranslations = (items: ArticleMeta[]) => {
-        void (async () => {
-          try {
-            const res = await fetch('/api/translate-titles', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              signal: controller.signal,
-              body: JSON.stringify({
-                articles: items.map((article) => ({ pmid: article.pmid, title: article.title })),
-              }),
-            })
-            if (!res.ok) {
-              applyTitles({})
-              return
+      const setTitlesPending = (pending: boolean) => {
+        setSessions((prev) =>
+          prev.map((session) => {
+            if (session.id !== sessionId) return session
+            return {
+              ...session,
+              turns: session.turns.map((item) =>
+                item.id === turnId && item.titlesPending !== pending ? { ...item, titlesPending: pending } : item,
+              ),
             }
-            const data = (await res.json()) as { titles?: Record<string, string> }
-            applyTitles(data.titles ?? {})
-          } catch {
-            applyTitles({})
-          }
-        })()
+          }),
+        )
+      }
+
+      const requestTitleTranslations = (items: ArticleMeta[]) => {
+        titleAbortRef.current.get(turnId)?.abort()
+        const titleAbort = new AbortController()
+        titleAbortRef.current.set(turnId, titleAbort)
+        // 不跟回答共用 AbortController：停止生成或接着追问时，这一轮已开始的翻译仍写回。
+        void runTitleTranslation({
+          articles: items,
+          answer: () =>
+            sessionsRef.current
+              .find((session) => session.id === sessionId)
+              ?.turns.find((item) => item.id === turnId)?.answer ?? '',
+          signal: titleAbort.signal,
+          limiter: titleSlots,
+          fetchTitles: postTitleBatch,
+          onTitles: mergeTitleMap,
+        }).finally(() => {
+          if (titleAbortRef.current.get(turnId) !== titleAbort) return
+          titleAbortRef.current.delete(turnId)
+          setTitlesPending(false)
+        })
       }
 
       let titleTranslationStarted = false
@@ -999,6 +1021,8 @@ function App() {
 
   const removeSession = useCallback(
     (id: string) => {
+      const removed = sessionsRef.current.find((session) => session.id === id)
+      removed?.turns.forEach((turn) => titleAbortRef.current.get(turn.id)?.abort())
       if (loadingRef.current && activeIdRef.current === id) stop()
       setSessions((prev) => prev.filter((session) => session.id !== id))
       if (activeIdRef.current === id) {

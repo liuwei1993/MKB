@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from .config import get_settings
 from .llm import LLMClient
 from .pipeline import run_ask
-from .titles import translate_titles
+from .titles import MAX_ARTICLES, translate_titles
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class TitleIn(BaseModel):
 
 
 class TranslateTitlesRequest(BaseModel):
-    articles: list[TitleIn] = Field(default_factory=list, max_length=50)
+    articles: list[TitleIn] = Field(default_factory=list, max_length=MAX_ARTICLES)
 
 
 @app.get("/api/health")
