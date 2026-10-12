@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# 一键构建并发布 MKB 到 lw@COMPANY_HOST:/data1/mkb （端口 9400）
+# 一键构建并发布 MKB
+#   ./scripts/deploy.sh         公司机 lw@COMPANY_HOST:/data1/mkb （端口 9400，docker）
+#   ./scripts/deploy.sh harry   个人机 root@PERSONAL_HOST:/opt/mkb （端口 9001，systemd + nginx）
 set -euo pipefail
 
-REMOTE="${REMOTE:-lw@COMPANY_HOST}"
-REMOTE_DIR="${REMOTE_DIR:-/data1/mkb}"
-OLD_REMOTE_DIR="${OLD_REMOTE_DIR:-~/mkb}"
-PORT="${PORT:-9400}"
-HEALTH_URL="http://${REMOTE#*@}:${PORT}/api/health"
+TARGET="${1:-}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -17,6 +15,29 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "缺少命令: $1" >&2; exit 
 need rsync
 need ssh
 need npm
+
+if [[ "$TARGET" == "harry" ]]; then
+  # 个人服务器。本机 ssh config 把该 IP 指到 52000，实际 sshd 在 22。
+  REMOTE="root@PERSONAL_HOST"
+  SSH_PORT=22
+  REMOTE_DIR="/opt/mkb"
+  PORT=9001
+  API_PORT=9101
+  ENV_FILE=".env-prod"
+  LOG_HINT="ssh -p ${SSH_PORT} ${REMOTE} 'journalctl -u mkb -n 80 --no-pager'"
+elif [[ -n "$TARGET" ]]; then
+  echo "未知部署目标: ${TARGET}" >&2
+  echo "用法: $0 [harry]" >&2
+  exit 1
+else
+  REMOTE="${REMOTE:-lw@COMPANY_HOST}"
+  REMOTE_DIR="${REMOTE_DIR:-/data1/mkb}"
+  OLD_REMOTE_DIR="${OLD_REMOTE_DIR:-~/mkb}"
+  PORT="${PORT:-9400}"
+  LOG_HINT="ssh ${REMOTE} 'cd ${REMOTE_DIR} && docker compose logs --tail 80'"
+fi
+
+HEALTH_URL="http://${REMOTE#*@}:${PORT}/api/health"
 
 # --- 确保远端目录存在且可写（/data1 通常需 root 建目录，用 docker 规避 sudo）---
 ensure_remote_dir() {
@@ -57,6 +78,7 @@ sync_code() {
     --exclude '.pytest_cache/' \
     --exclude '.mypy_cache/' \
     --exclude '.DS_Store' \
+    --exclude '.env-prod' \
     "$ROOT/" "${REMOTE}:${REMOTE_DIR}/"
 }
 
@@ -99,13 +121,122 @@ health_check() {
     fi
     sleep 2
   done
-  echo "健康检查失败，查看日志: ssh ${REMOTE} 'cd ${REMOTE_DIR} && docker compose logs --tail 80'" >&2
+  echo "健康检查失败，查看日志: ${LOG_HINT}" >&2
   exit 1
 }
 
-ensure_remote_dir
-build_frontend
-sync_code
-stop_old_stack
-compose_up
-health_check
+ssh_harry() {
+  ssh -p "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes "$REMOTE" "$@"
+}
+
+# 个人机内存约 1.6GB 且未装 Docker，用本机 venv + nginx。
+deploy_harry() {
+  log "个人服务器 ${REMOTE}:${REMOTE_DIR} 端口 ${PORT}"
+  test -f "$ENV_FILE" || { echo "缺少 ${ENV_FILE}，请先配置密钥" >&2; exit 1; }
+  build_frontend
+
+  log "同步到 ${REMOTE}:${REMOTE_DIR}"
+  ssh_harry "mkdir -p '${REMOTE_DIR}'"
+  rsync -az --delete \
+    -e "ssh -p ${SSH_PORT} -o BatchMode=yes -o IdentitiesOnly=yes" \
+    --exclude '.venv/' \
+    --exclude 'venv/' \
+    --exclude 'frontend/node_modules/' \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude '.git/' \
+    --exclude '.pytest_cache/' \
+    --exclude '.mypy_cache/' \
+    --exclude '.DS_Store' \
+    --exclude '.env' \
+    --exclude '.env-prod' \
+    "$ROOT/" "${REMOTE}:${REMOTE_DIR}/"
+
+  log "写入远端环境变量（${ENV_FILE}）"
+  scp -P "$SSH_PORT" -o BatchMode=yes -o IdentitiesOnly=yes \
+    "$ENV_FILE" "${REMOTE}:${REMOTE_DIR}/.env"
+  ssh_harry "chmod 600 '${REMOTE_DIR}/.env'"
+
+  log "安装依赖并重启服务"
+  ssh_harry "REMOTE_DIR=${REMOTE_DIR} API_PORT=${API_PORT} PORT=${PORT} bash -s" <<'EOF'
+set -euo pipefail
+cd "$REMOTE_DIR"
+test -f .env
+test -d frontend/dist
+if [[ ! -x .venv/bin/pip ]]; then
+  python3 -m venv .venv
+fi
+.venv/bin/pip install --no-cache-dir \
+  -i https://mirrors.aliyun.com/pypi/simple/ \
+  --trusted-host mirrors.aliyun.com \
+  -r backend/requirements.txt
+
+cat > /etc/systemd/system/mkb.service << UNIT
+[Unit]
+Description=MKB PubMed Q&A
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${REMOTE_DIR}
+EnvironmentFile=${REMOTE_DIR}/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=${REMOTE_DIR}/.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port ${API_PORT}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/nginx/conf.d/mkb.conf << NGINX
+server {
+    listen ${PORT};
+    listen [::]:${PORT};
+    server_name _;
+    client_max_body_size 20m;
+
+    root ${REMOTE_DIR}/frontend/dist;
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:${API_PORT}/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+NGINX
+
+nginx -t
+systemctl daemon-reload
+systemctl enable mkb.service
+systemctl restart mkb.service
+systemctl reload nginx
+EOF
+
+  health_check
+}
+
+if [[ "$TARGET" == "harry" ]]; then
+  deploy_harry
+else
+  ensure_remote_dir
+  build_frontend
+  sync_code
+  stop_old_stack
+  compose_up
+  health_check
+fi

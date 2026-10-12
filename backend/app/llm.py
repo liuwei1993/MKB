@@ -30,6 +30,16 @@ class LLMClient:
             "Content-Type": "application/json",
         }
 
+    def _thinking_off(self) -> dict[str, Any]:
+        """Keep the token budget on the answer, not hidden reasoning.
+
+        Official DeepSeek ignores enable_thinking on streams and puts the
+        answer in reasoning_content. DashScope uses enable_thinking.
+        """
+        if "api.deepseek.com" in self.settings.llm_base_url:
+            return {"thinking": {"type": "disabled"}}
+        return {"enable_thinking": False}
+
     async def embed(self, texts: list[str], *, batch_size: int = 10) -> list[list[float]]:
         """Embed texts via OpenAI-compatible /embeddings (DashScope; max batch 10)."""
         assert self._client is not None
@@ -77,8 +87,7 @@ class LLMClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
-            # deepseek-v4.1-flash otherwise spends the budget on reasoning_content
-            "enable_thinking": False,
+            **self._thinking_off(),
         }
         r = await self._client.post(url, headers=self._headers(), json=payload)
         data = r.json()
@@ -104,7 +113,7 @@ class LLMClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
-            "enable_thinking": False,
+            **self._thinking_off(),
         }
         async with self._client.stream(
             "POST", url, headers=self._headers(), json=payload
