@@ -172,11 +172,15 @@ def format_rag_evidence(chunks: list[Chunk], articles: list[Article]) -> str:
         journal = f"{a.journal} ({a.year})" if a else ""
         authors = a.authors if a else ""
         source_label = "全文" if c.source == "fulltext" else "摘要"
+        type_line = ""
+        if a and a.pub_types:
+            type_line = f"Type: {', '.join(a.pub_types)}\n"
         blocks.append(
             f"[{i}] PMID:{c.pmid} ({source_label}#{c.index})\n"
             f"Title: {c.title}\n"
             f"Journal: {journal}\n"
             f"Authors: {authors}\n"
+            f"{type_line}"
             f"Passage:\n{c.text}"
         )
     return "\n\n".join(blocks)

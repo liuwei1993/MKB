@@ -24,16 +24,13 @@ const PUB_TYPE_ZH: Record<string, string> = {
 }
 
 function isNoise(label: string): boolean {
-  return (
-    label === 'English Abstract' ||
-    label.startsWith('Research Support') ||
-    label === 'Retracted Publication'
-  )
+  return label === 'English Abstract' || label.startsWith('Research Support')
 }
 
 /** Prefer a specific study type over the generic journal-article label. */
 export function pubTypeLabel(types: string[] | undefined): string {
   const list = (types ?? []).map((item) => item.trim()).filter(Boolean)
+  if (list.includes('Retracted Publication')) return '已撤稿'
   const specific = list.find((item) => item !== 'Journal Article' && !isNoise(item))
   const chosen = specific || list.find((item) => !isNoise(item))
   if (!chosen) return ''

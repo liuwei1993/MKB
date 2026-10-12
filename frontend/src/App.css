@@ -1009,6 +1009,11 @@
   font-size: 0.72rem;
 }
 
+.pub-type.retracted {
+  background: #fff1f0;
+  color: #cf1322;
+}
+
 .expand-row {
   margin-top: 4px;
 }

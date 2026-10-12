@@ -71,14 +71,20 @@ class PMCClient:
             text = text[: max_chars - 1] + "…"
         return text.strip() or None
 
-    async def attach_fulltexts(self, articles: list[Article]) -> int:
+    async def attach_fulltexts(
+        self,
+        articles: list[Article],
+        candidates: list[Article] | None = None,
+    ) -> int:
         """
-        Fetch OA full text for up to fulltext_max_articles with pmcid.
+        Fetch OA full text for the given candidates, or the first
+        fulltext_max_articles with a PMCID when candidates is omitted.
         Mutates articles in place. Returns count successfully fetched.
         """
         limit = self.settings.fulltext_max_articles
         all_with_pmcid = [a for a in articles if _normalize_pmcid(a.pmcid)]
-        candidates = all_with_pmcid[:limit]
+        if candidates is None:
+            candidates = all_with_pmcid[:limit]
         t0 = time.perf_counter()
         if not candidates:
             logger.info("pmc_fulltext candidates=0 limit=%d (无 PMCID 命中)", limit)
@@ -104,11 +110,11 @@ class PMCClient:
         total_chars = sum(len(a.fulltext) for a in candidates if a.has_fulltext)
         elapsed = time.perf_counter() - t0
         # 评估 FULLTEXT_MAX_ARTICLES：cap 被打满说明调大有收益空间
-        if len(all_with_pmcid) > limit:
+        if len(all_with_pmcid) > len(candidates):
             logger.warning(
                 "pmc_fulltext cap 打满: 有 PMCID 的文章 %d 篇，仅抓取 %d 篇"
                 " (FULLTEXT_MAX_ARTICLES=%d)，调大该参数可覆盖更多全文",
-                len(all_with_pmcid), limit, limit,
+                len(all_with_pmcid), len(candidates), limit,
             )
         logger.info(
             "pmc_fulltext limit=%d candidates=%d fetched=%d failed=%d "

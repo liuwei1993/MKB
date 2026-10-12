@@ -10,7 +10,12 @@ from typing import Any
 from .config import Settings
 from .llm import LLMClient
 from .pmc import PMCClient
-from .pubmed import Article, PubMedClient
+from .pubmed import (
+    Article,
+    PubMedClient,
+    articles_for_evidence,
+    select_fulltext_candidates,
+)
 from .rag import Chunk, build_chunks, format_rag_evidence, retrieve_chunks
 
 logger = logging.getLogger(__name__)
@@ -24,7 +29,7 @@ QUESTION_MAX_CHARS = 4000
 
 UNDERSTAND_SYSTEM = """你是医学检索助手。根据对话上下文，判断用户本轮发言与历史的关系，并给出可独立检索的问题与 PubMed 检索式。
 只返回 JSON，不要 markdown，不要解释：
-{"relation":"follow_up","standalone_question":"...","queries":["..."]}
+{"relation":"follow_up","question_type":"treatment","standalone_question":"...","queries":["..."]}
 
 relation 只能是以下三者之一：
 - follow_up：追问。必须消解指代和省略（如「那女性呢」「这篇呢」「副作用呢」）。standalone_question 不看对话也要完整，写明疾病、药物、人群。
@@ -33,7 +38,8 @@ relation 只能是以下三者之一：
 
 规则：
 - 没有更早对话时，relation 必须是 new_topic。
-- queries 为 1 到 3 条英文检索式；可用 MeSH 风格词汇、同义词和简单 AND/OR；每条保持简短。rephrase 时为空数组。
+- queries 为 1 到 3 条英文检索式；可用 MeSH 风格词汇、同义词和简单 AND/OR；每条保持简短。布尔运算符 AND、OR、NOT 必须大写；多个词的术语加引号。不要写 [pt]、[MeSH Terms]、人类或年份限制，研究设计过滤由系统追加。rephrase 时为空数组。
+- question_type 只能是 treatment、prevention、diagnosis、prognosis、etiology、mechanism、other。疗效用 treatment，预防用 prevention，诊断用 diagnosis，预后用 prognosis，病因用 etiology，机制用 mechanism，其余用 other。
 - standalone_question 用中文，完整、可单独理解。"""
 
 SUMMARY_SYSTEM = """你把医学问答对话压缩成一段中文摘要，供后续追问消解指代。
@@ -50,7 +56,10 @@ ANSWER_SYSTEM = """你是医学文献助手。仅依据用户提供的文献检�
 6. 末尾用一两句总结临床/科研含义。
 7. 声明：回答仅供科研与学习参考，不能替代临床诊疗决策。
 8. 适合对照或罗列成分、指标时使用 Markdown 表格。
-9. 引用格式只能是 [PMID:数字]，不要改成脚注序号或其他写法。"""
+9. 引用格式只能是 [PMID:数字]，不要改成脚注序号或其他写法。
+10. 若证据里同时有系统综述、荟萃分析或随机对照试验与较低等级研究，优先综合更高等级的研究设计。单篇研究不能写成定论。
+11. 撤稿文献不能当作有效证据。
+12. 不要评价材料中没有写出的样本量、置信区间、资金来源或利益冲突。"""
 
 SUGGEST_SYSTEM = """根据本轮医学问答，提出用户可能接着追问的问题。
 只返回 JSON，不要 markdown，不要解释：
@@ -70,6 +79,33 @@ REPHRASE_SYSTEM = """你是医学文献助手。用户希望改写上一轮回�
 
 _PMID_RE = re.compile(r"PMID\s*[:：]?\s*(\d{4,10})", re.I)
 _RELATIONS = {"follow_up", "new_topic", "rephrase"}
+_QUESTION_TYPES = {
+    "treatment",
+    "prevention",
+    "diagnosis",
+    "prognosis",
+    "etiology",
+    "mechanism",
+    "other",
+}
+_TREATMENT_CLAUSE = (
+    '("systematic review"[pt] OR "meta-analysis"[pt] OR '
+    '"randomized controlled trial"[pt])'
+)
+_DIAGNOSIS_CLAUSE = (
+    '("systematic review"[pt] OR "meta-analysis"[pt] OR '
+    '"validation study"[pt] OR "evaluation study"[pt])'
+)
+_OBSERVATIONAL_CLAUSE = (
+    '("systematic review"[pt] OR "meta-analysis"[pt] OR "observational study"[pt])'
+)
+_DESIGN_CLAUSES = {
+    "treatment": _TREATMENT_CLAUSE,
+    "prevention": _TREATMENT_CLAUSE,
+    "diagnosis": _DIAGNOSIS_CLAUSE,
+    "prognosis": _OBSERVATIONAL_CLAUSE,
+    "etiology": _OBSERVATIONAL_CLAUSE,
+}
 
 
 def _clip(text: str, limit: int) -> str:
@@ -182,11 +218,26 @@ def parse_understand(raw: str, question: str, *, has_history: bool) -> dict[str,
     queries = [] if relation == "rephrase" else _queries_from(data)
     if relation != "rephrase" and not queries:
         queries = [standalone]
+    question_type = str(data.get("question_type") or "").strip()
+    if question_type not in _QUESTION_TYPES:
+        question_type = "other"
     return {
         "relation": relation,
         "standalone_question": standalone,
         "queries": queries[:3],
+        "question_type": question_type,
     }
+
+
+def design_filter_query(queries: list[str], question_type: str) -> str | None:
+    """Append one fixed study-design clause to the first broad query."""
+    clause = _DESIGN_CLAUSES.get(question_type)
+    if not clause or not queries:
+        return None
+    base = queries[0].strip()
+    if not base:
+        return None
+    return f"({base}) AND {clause}"
 
 
 def format_context_block(ctx: dict[str, Any]) -> str:
@@ -370,11 +421,13 @@ def format_evidence_fallback(articles: list[Article], max_chars: int) -> str:
         abs_text = a.abstract.strip() or "(无摘要)"
         if len(abs_text) > max_chars:
             abs_text = abs_text[: max_chars - 1] + "…"
+        type_line = f"Type: {', '.join(a.pub_types)}\n" if a.pub_types else ""
         blocks.append(
             f"[{i}] PMID:{a.pmid}\n"
             f"Title: {a.title}\n"
             f"Journal: {a.journal} ({a.year})\n"
             f"Authors: {a.authors}\n"
+            f"{type_line}"
             f"Abstract: {abs_text}"
         )
     return "\n\n".join(blocks)
@@ -452,13 +505,23 @@ async def run_ask(
             understood = await understand_turn(llm, question, ctx)
             timings["understand_s"] = round(time.perf_counter() - t, 2)
             logger.info(
-                "ask_understand relation=%s standalone=%r queries=%s elapsed=%.2fs",
-                understood["relation"], understood["standalone_question"],
+                "ask_understand relation=%s question_type=%s standalone=%r queries=%s elapsed=%.2fs",
+                understood["relation"], understood["question_type"],
+                understood["standalone_question"],
                 understood["queries"], timings["understand_s"],
             )
             relation = understood["relation"]
             standalone = understood["standalone_question"]
-            queries = understood["queries"]
+            broad_queries = understood["queries"]
+            question_type = understood["question_type"]
+            priority = (
+                None
+                if relation == "rephrase"
+                else design_filter_query(broad_queries, question_type)
+            )
+            queries = list(broad_queries)
+            if priority:
+                queries.append(priority)
             yield {
                 "type": "queries",
                 "queries": queries,
@@ -477,7 +540,14 @@ async def run_ask(
             else:
                 t = time.perf_counter()
                 async for event in _retrieve_evidence(
-                    settings, llm, pubmed, pmc, standalone, queries
+                    settings,
+                    llm,
+                    pubmed,
+                    pmc,
+                    standalone,
+                    broad_queries,
+                    priority,
+                    question_type,
                 ):
                     if event["type"] == "_evidence":
                         evidence = event["evidence"]
@@ -552,6 +622,7 @@ async def run_ask(
                 json.dumps(
                     {
                         "relation": relation,
+                        "question_type": question_type,
                         "evidence_mode": mode,
                         "article_count": article_count,
                         "fulltext_fetched": fulltext_n,
@@ -586,9 +657,11 @@ async def _retrieve_evidence(
     pmc: PMCClient,
     standalone: str,
     queries: list[str],
+    priority_query: str | None,
+    question_type: str,
 ) -> AsyncIterator[dict[str, Any]]:
     yield _status("正在检索 PubMed…", "search")
-    articles = await pubmed.search_articles(queries)
+    articles = await pubmed.search_articles(queries, priority_query=priority_query)
     if not articles:
         yield {
             "type": "error",
@@ -603,7 +676,11 @@ async def _retrieve_evidence(
     }
 
     yield _status("正在获取开放获取全文…", "fulltext")
-    fulltext_n = await pmc.attach_fulltexts(articles)
+    fulltext_candidates = select_fulltext_candidates(
+        articles, question_type, settings.fulltext_max_articles
+    )
+    fulltext_n = await pmc.attach_fulltexts(articles, fulltext_candidates)
+    evidence_articles = articles_for_evidence(articles)
 
     yield {
         "type": "meta",
@@ -624,7 +701,7 @@ async def _retrieve_evidence(
     try:
         yield _status("正在检索相关段落…", "passages")
         chunks = build_chunks(
-            articles,
+            evidence_articles,
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
             abstract_max_chars=settings.abstract_max_chars,
@@ -650,7 +727,9 @@ async def _retrieve_evidence(
     except Exception as rag_err:
         logger.warning("rag_fallback reason=%s", rag_err)
         yield _status(f"段落检索失败，回退摘要作答（{rag_err}）…", "passages")
-        evidence = format_evidence_fallback(articles, settings.abstract_max_chars)
+        evidence = format_evidence_fallback(
+            evidence_articles, settings.abstract_max_chars
+        )
 
     if used_rag:
         yield {"type": "passages", "items": passage_items(top)}
@@ -658,7 +737,7 @@ async def _retrieve_evidence(
         yield {
             "type": "passages",
             "items": passage_items_from_articles(
-                articles, settings.abstract_max_chars
+                evidence_articles, settings.abstract_max_chars
             ),
         }
 

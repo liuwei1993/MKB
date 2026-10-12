@@ -12,6 +12,23 @@ from .config import Settings
 logger = logging.getLogger(__name__)
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+PRIORITY_EXTRA = 15
+RETRACTED_PUBLICATION = "Retracted Publication"
+
+_COMMON_HIGH_TIER = {
+    "Systematic Review",
+    "Meta-Analysis",
+    "Network Meta-Analysis",
+    "Guideline",
+    "Practice Guideline",
+}
+_HIGH_TIER: dict[str, set[str]] = {
+    "treatment": _COMMON_HIGH_TIER | {"Randomized Controlled Trial", "Clinical Trial"},
+    "prevention": _COMMON_HIGH_TIER | {"Randomized Controlled Trial", "Clinical Trial"},
+    "diagnosis": _COMMON_HIGH_TIER | {"Validation Study", "Evaluation Study"},
+    "prognosis": _COMMON_HIGH_TIER | {"Observational Study", "Multicenter Study"},
+    "etiology": _COMMON_HIGH_TIER | {"Observational Study", "Multicenter Study"},
+}
 
 
 @dataclass
@@ -134,7 +151,11 @@ class PubMedClient:
                 await asyncio.sleep(0.12)
         return articles
 
-    async def search_articles(self, queries: list[str]) -> list[Article]:
+    async def search_articles(
+        self,
+        queries: list[str],
+        priority_query: str | None = None,
+    ) -> list[Article]:
         seen: list[str] = []
         seen_set: set[str] = set()
         per = self.settings.retmax_per_query
@@ -153,15 +174,94 @@ class PubMedClient:
                         break
             await asyncio.sleep(0.12)
 
-        articles = await self.efetch(seen)
+        priority = (priority_query or "").strip()
+        if priority:
+            try:
+                ids = await self.esearch(priority, retmax=per)
+            except Exception:
+                logger.warning(
+                    "pubmed_esearch priority failed query=%r", priority, exc_info=True
+                )
+                ids = []
+            added = 0
+            for pmid in ids:
+                if pmid in seen_set:
+                    continue
+                seen_set.add(pmid)
+                seen.append(pmid)
+                added += 1
+                if added >= PRIORITY_EXTRA:
+                    break
+            logger.info(
+                "pubmed_esearch query=%r hits=%d priority_added=%d",
+                priority, len(ids), added,
+            )
+            await asyncio.sleep(0.12)
+
+        fetched = await self.efetch(seen)
+        by_pmid = {article.pmid: article for article in fetched}
+        articles = [by_pmid[pmid] for pmid in seen if pmid in by_pmid]
         logger.info(
             "pubmed_fetch queries=%d unique_pmids=%d articles=%d "
             "with_abstract=%d with_pmcid=%d",
-            len(queries), len(seen), len(articles),
+            len(queries) + (1 if priority else 0), len(seen), len(articles),
             sum(1 for a in articles if a.abstract.strip()),
             sum(1 for a in articles if _normalize_pmcid(a.pmcid)),
         )
         return articles
+
+
+def is_retracted(article: Article) -> bool:
+    return RETRACTED_PUBLICATION in article.pub_types
+
+
+def articles_for_evidence(articles: list[Article]) -> list[Article]:
+    return [article for article in articles if not is_retracted(article)]
+
+
+def select_fulltext_candidates(
+    articles: list[Article],
+    question_type: str,
+    limit: int,
+) -> list[Article]:
+    """Pick OA full-text slots: relevance first, then a few high-tier reserves."""
+    if limit <= 0:
+        return []
+    eligible = [
+        article
+        for article in articles
+        if _normalize_pmcid(article.pmcid) and not is_retracted(article)
+    ]
+    tiers = _HIGH_TIER.get(question_type)
+    if not tiers:
+        return eligible[:limit]
+
+    reserved = min(3, limit // 3)
+    if reserved == 0:
+        return eligible[:limit]
+    relevance = eligible[: limit - reserved]
+    chosen_ids = {article.pmid for article in relevance}
+    high: list[Article] = []
+    for article in eligible:
+        if article.pmid in chosen_ids:
+            continue
+        if not any(label in tiers for label in article.pub_types):
+            continue
+        high.append(article)
+        if len(high) >= reserved:
+            break
+
+    chosen = relevance + high
+    if len(chosen) >= limit:
+        return chosen[:limit]
+    chosen_ids = {article.pmid for article in chosen}
+    for article in eligible:
+        if article.pmid in chosen_ids:
+            continue
+        chosen.append(article)
+        if len(chosen) >= limit:
+            break
+    return chosen
 
 
 def _text(el: ET.Element | None) -> str:
