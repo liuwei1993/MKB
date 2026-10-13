@@ -77,29 +77,35 @@ class DesignFilterTest(unittest.TestCase):
         self.assertEqual(
             query,
             '(heart failure) AND ("systematic review"[pt] OR "meta-analysis"[pt] '
-            'OR "randomized controlled trial"[pt])',
+            'OR "network meta-analysis"[pt] OR "guideline"[pt] OR '
+            '"practice guideline"[pt] OR "randomized controlled trial"[pt])',
         )
         self.assertEqual(
             design_filter_query(["statin"], "prevention"),
             '(statin) AND ("systematic review"[pt] OR "meta-analysis"[pt] '
-            'OR "randomized controlled trial"[pt])',
+            'OR "network meta-analysis"[pt] OR "guideline"[pt] OR '
+            '"practice guideline"[pt] OR "randomized controlled trial"[pt])',
         )
 
     def test_diagnosis_and_prognosis_use_their_clauses(self):
         self.assertEqual(
             design_filter_query(["troponin"], "diagnosis"),
             '(troponin) AND ("systematic review"[pt] OR "meta-analysis"[pt] '
-            'OR "validation study"[pt] OR "evaluation study"[pt])',
+            'OR "network meta-analysis"[pt] OR "guideline"[pt] OR '
+            '"practice guideline"[pt] OR "validation study"[pt] OR '
+            '"evaluation study"[pt])',
         )
         self.assertEqual(
             design_filter_query(["cancer survival"], "prognosis"),
             '(cancer survival) AND ("systematic review"[pt] OR "meta-analysis"[pt] '
-            'OR "observational study"[pt])',
+            'OR "network meta-analysis"[pt] OR "guideline"[pt] OR '
+            '"practice guideline"[pt] OR "observational study"[pt])',
         )
         self.assertEqual(
             design_filter_query(["smoking"], "etiology"),
             '(smoking) AND ("systematic review"[pt] OR "meta-analysis"[pt] '
-            'OR "observational study"[pt])',
+            'OR "network meta-analysis"[pt] OR "guideline"[pt] OR '
+            '"practice guideline"[pt] OR "observational study"[pt])',
         )
 
     def test_mechanism_and_other_add_nothing(self):
@@ -188,6 +194,14 @@ class FulltextSlotTest(unittest.TestCase):
         chosen = [a.pmid for a in select_fulltext_candidates(articles, "treatment", 10)]
         self.assertEqual(chosen, ["1", "2", "3", "4", "5", "6", "7", "9", "10", "11"])
         self.assertNotIn("8", chosen)
+
+    def test_clinical_trial_does_not_take_the_reserve_ahead_of_a_review(self):
+        articles = [_article(str(i), pmcid=f"PMC{i}") for i in range(1, 8)]
+        articles.append(_article("8", pmcid="PMC8", types=["Clinical Trial"]))
+        articles.extend(_article(str(i), pmcid=f"PMC{i}") for i in range(10, 13))
+        articles.append(_article("13", pmcid="PMC13", types=["Systematic Review"]))
+        chosen = [a.pmid for a in select_fulltext_candidates(articles, "treatment", 10)]
+        self.assertEqual(chosen[7], "13")
 
 
 class EvidenceTextTest(unittest.TestCase):
@@ -287,6 +301,28 @@ class PrioritySearchTest(unittest.IsolatedAsyncioTestCase):
             articles = await pubmed.search_articles(["broad"], priority_query="filtered")
         self.assertEqual(len(articles), 16)
         self.assertEqual(articles[0].pmid, "1")
+
+    async def test_broad_search_pages_until_the_target_is_full(self):
+        pubmed = PubMedClient(
+            _settings(target_pmids=30, retmax_per_query=25), client=object()
+        )
+        calls: list[tuple[str, int, int]] = []
+
+        async def esearch(term: str, retmax: int, retstart: int = 0) -> list[str]:
+            calls.append((term, retmax, retstart))
+            if retstart == 0:
+                return [str(i) for i in range(1, 26)]
+            return [str(i) for i in range(26, 31)]
+
+        async def efetch(pmids: list[str]) -> list[Article]:
+            return [_article(pmid, pmcid=f"PMC{pmid}") for pmid in pmids]
+
+        pubmed.esearch = esearch  # type: ignore[method-assign]
+        pubmed.efetch = efetch  # type: ignore[method-assign]
+        with patch("backend.app.pubmed.asyncio.sleep", new=AsyncMock()):
+            articles = await pubmed.search_articles(["broad"])
+        self.assertEqual([a.pmid for a in articles], [str(i) for i in range(1, 31)])
+        self.assertEqual(calls, [("broad", 25, 0), ("broad", 25, 25)])
 
 
 if __name__ == "__main__":

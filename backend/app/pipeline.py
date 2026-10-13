@@ -88,17 +88,15 @@ _QUESTION_TYPES = {
     "mechanism",
     "other",
 }
-_TREATMENT_CLAUSE = (
-    '("systematic review"[pt] OR "meta-analysis"[pt] OR '
-    '"randomized controlled trial"[pt])'
+_SYNTHESIS_CLAUSE = (
+    '"systematic review"[pt] OR "meta-analysis"[pt] OR '
+    '"network meta-analysis"[pt] OR "guideline"[pt] OR "practice guideline"[pt]'
 )
+_TREATMENT_CLAUSE = f"({_SYNTHESIS_CLAUSE} OR \"randomized controlled trial\"[pt])"
 _DIAGNOSIS_CLAUSE = (
-    '("systematic review"[pt] OR "meta-analysis"[pt] OR '
-    '"validation study"[pt] OR "evaluation study"[pt])'
+    f"({_SYNTHESIS_CLAUSE} OR \"validation study\"[pt] OR \"evaluation study\"[pt])"
 )
-_OBSERVATIONAL_CLAUSE = (
-    '("systematic review"[pt] OR "meta-analysis"[pt] OR "observational study"[pt])'
-)
+_OBSERVATIONAL_CLAUSE = f"({_SYNTHESIS_CLAUSE} OR \"observational study\"[pt])"
 _DESIGN_CLAUSES = {
     "treatment": _TREATMENT_CLAUSE,
     "prevention": _TREATMENT_CLAUSE,
@@ -505,10 +503,9 @@ async def run_ask(
             understood = await understand_turn(llm, question, ctx)
             timings["understand_s"] = round(time.perf_counter() - t, 2)
             logger.info(
-                "ask_understand relation=%s question_type=%s standalone=%r queries=%s elapsed=%.2fs",
+                "ask_understand relation=%s question_type=%s queries=%d elapsed=%.2fs",
                 understood["relation"], understood["question_type"],
-                understood["standalone_question"],
-                understood["queries"], timings["understand_s"],
+                len(understood["queries"]), timings["understand_s"],
             )
             relation = understood["relation"]
             standalone = understood["standalone_question"]
@@ -642,8 +639,8 @@ async def run_ask(
                 yield {"type": "suggestions", "questions": questions}
             yield {"type": "done"}
         except Exception as e:
-            logger.error("ask_failed question=%r: %s", question, e, exc_info=True)
-            yield {"type": "error", "message": str(e)}
+            logger.error("ask_failed: %s", e)
+            yield {"type": "error", "message": "生成失败，请稍后重试。"}
     finally:
         await pmc.__aexit__(None, None, None)
         await pubmed.__aexit__(None, None, None)
@@ -688,7 +685,7 @@ async def _retrieve_evidence(
         "count": len(articles),
     }
 
-    with_abs = sum(1 for a in articles if a.abstract.strip())
+    with_abs = sum(1 for a in evidence_articles if a.abstract.strip())
     if fulltext_n == 0 and with_abs == 0:
         yield _status(
             "无全文且无摘要，将仅依据标题等信息作答（证据有限）。",
@@ -745,7 +742,7 @@ async def _retrieve_evidence(
         "type": "_evidence",
         "evidence": evidence,
         "mode": "RAG 段落" if used_rag else "摘要",
-        "article_count": len(articles),
+        "article_count": len(evidence_articles),
         "fulltext_n": fulltext_n,
         "with_abs": with_abs,
     }

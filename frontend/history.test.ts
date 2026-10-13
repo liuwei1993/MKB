@@ -48,6 +48,21 @@ describe('carryEvidence', () => {
     const only = [turn('a')]
     assert.equal(carryEvidence(only, 'a'), only)
   })
+
+  it('skips an empty rephrase and keeps the earlier articles', () => {
+    const article = {
+      pmid: '12345678',
+      title: 'Example',
+      journal: 'Foods',
+      year: '2024',
+      authors: 'Doe J',
+      url: 'https://pubmed.ncbi.nlm.nih.gov/12345678/',
+      has_abstract: true,
+    }
+    const next = carryEvidence([turn('a', [article]), turn('b'), turn('c')], 'c')
+    assert.equal(next[2]?.articles[0]?.pmid, '12345678')
+    assert.equal(next[1]?.articles.length, 0)
+  })
 })
 
 describe('loadSessions', () => {
@@ -92,5 +107,34 @@ describe('loadSessions', () => {
     assert.equal(session?.turns[1]?.stopped, true)
     assert.equal(session?.turns[2]?.stopped, false)
     assert.equal(session?.turns[2]?.error, '请求失败')
+  })
+
+  it('folds a refreshed partial answer into the next turn context', () => {
+    const store = new Map<string, string>()
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          store.set(key, value)
+        },
+      },
+    })
+    store.set(
+      STORAGE_KEY,
+      JSON.stringify([
+        {
+          id: 's',
+          title: '中断',
+          updatedAt: 1,
+          context: { summary: '', recent: [] },
+          turns: [{ id: 'partial', question: '问题', answer: '半截回答', phase: 'answer' }],
+        },
+      ]),
+    )
+    const [session] = loadSessions()
+    assert.equal(session?.turns[0]?.stopped, true)
+    assert.equal(session?.context.last_answer, '半截回答')
+    assert.equal(session?.context.recent[0]?.question, '问题')
   })
 })

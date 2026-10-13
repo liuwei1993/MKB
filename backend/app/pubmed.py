@@ -23,11 +23,11 @@ _COMMON_HIGH_TIER = {
     "Practice Guideline",
 }
 _HIGH_TIER: dict[str, set[str]] = {
-    "treatment": _COMMON_HIGH_TIER | {"Randomized Controlled Trial", "Clinical Trial"},
-    "prevention": _COMMON_HIGH_TIER | {"Randomized Controlled Trial", "Clinical Trial"},
+    "treatment": _COMMON_HIGH_TIER | {"Randomized Controlled Trial"},
+    "prevention": _COMMON_HIGH_TIER | {"Randomized Controlled Trial"},
     "diagnosis": _COMMON_HIGH_TIER | {"Validation Study", "Evaluation Study"},
-    "prognosis": _COMMON_HIGH_TIER | {"Observational Study", "Multicenter Study"},
-    "etiology": _COMMON_HIGH_TIER | {"Observational Study", "Multicenter Study"},
+    "prognosis": _COMMON_HIGH_TIER | {"Observational Study"},
+    "etiology": _COMMON_HIGH_TIER | {"Observational Study"},
 }
 
 
@@ -113,7 +113,7 @@ class PubMedClient:
             params["api_key"] = self.settings.ncbi_api_key
         return params
 
-    async def esearch(self, term: str, retmax: int) -> list[str]:
+    async def esearch(self, term: str, retmax: int, retstart: int = 0) -> list[str]:
         assert self._client is not None
         params = {
             **self._auth_params(),
@@ -123,8 +123,15 @@ class PubMedClient:
             "retmode": "json",
             "sort": "relevance",
         }
-        r = await self._client.get(f"{EUTILS}/esearch.fcgi", params=params)
-        r.raise_for_status()
+        if retstart:
+            params["retstart"] = str(retstart)
+        try:
+            r = await self._client.get(f"{EUTILS}/esearch.fcgi", params=params)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"PubMed esearch HTTP {exc.response.status_code}"
+            ) from None
         data = r.json()
         result = data.get("esearchresult") or {}
         if result.get("ERROR"):
@@ -144,12 +151,47 @@ class PubMedClient:
                 "id": ",".join(batch),
                 "retmode": "xml",
             }
-            r = await self._client.get(f"{EUTILS}/efetch.fcgi", params=params)
-            r.raise_for_status()
+            try:
+                r = await self._client.get(f"{EUTILS}/efetch.fcgi", params=params)
+                r.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(
+                    f"PubMed efetch HTTP {exc.response.status_code}"
+                ) from None
             articles.extend(_parse_pubmed_xml(r.text))
             if i + 200 < len(pmids):
                 await asyncio.sleep(0.12)
         return articles
+
+    async def _collect_new_ids(
+        self, term: str, seen: set[str], limit: int
+    ) -> list[str]:
+        """Page a query until `limit` PMIDs not already in `seen` are found."""
+        if limit <= 0:
+            return []
+        page = max(1, self.settings.retmax_per_query)
+        added: list[str] = []
+        start = 0
+        for _ in range(4):
+            if len(added) >= limit:
+                break
+            if start:
+                ids = await self.esearch(term, page, start)
+            else:
+                ids = await self.esearch(term, page)
+            if not ids:
+                break
+            for pmid in ids:
+                if pmid in seen or pmid in added:
+                    continue
+                added.append(pmid)
+                if len(added) >= limit:
+                    break
+            if len(ids) != page:
+                break
+            start += page
+            await asyncio.sleep(0.12)
+        return added
 
     async def search_articles(
         self,
@@ -158,43 +200,35 @@ class PubMedClient:
     ) -> list[Article]:
         seen: list[str] = []
         seen_set: set[str] = set()
-        per = self.settings.retmax_per_query
         target = self.settings.target_pmids
 
         for q in queries:
             if len(seen) >= target:
                 break
-            ids = await self.esearch(q, retmax=per)
-            logger.info("pubmed_esearch query=%r hits=%d", q, len(ids))
-            for pmid in ids:
-                if pmid not in seen_set:
-                    seen_set.add(pmid)
-                    seen.append(pmid)
-                    if len(seen) >= target:
-                        break
+            added = await self._collect_new_ids(q, seen_set, target - len(seen))
+            logger.info("pubmed_esearch query=%r hits=%d", q, len(added))
+            for pmid in added:
+                seen_set.add(pmid)
+                seen.append(pmid)
             await asyncio.sleep(0.12)
 
         priority = (priority_query or "").strip()
         if priority:
             try:
-                ids = await self.esearch(priority, retmax=per)
+                added_ids = await self._collect_new_ids(
+                    priority, seen_set, PRIORITY_EXTRA
+                )
             except Exception:
                 logger.warning(
                     "pubmed_esearch priority failed query=%r", priority, exc_info=True
                 )
-                ids = []
-            added = 0
-            for pmid in ids:
-                if pmid in seen_set:
-                    continue
+                added_ids = []
+            for pmid in added_ids:
                 seen_set.add(pmid)
                 seen.append(pmid)
-                added += 1
-                if added >= PRIORITY_EXTRA:
-                    break
             logger.info(
-                "pubmed_esearch query=%r hits=%d priority_added=%d",
-                priority, len(ids), added,
+                "pubmed_esearch query=%r priority_added=%d",
+                priority, len(added_ids),
             )
             await asyncio.sleep(0.12)
 

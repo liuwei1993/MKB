@@ -171,6 +171,11 @@ fi
   --trusted-host mirrors.aliyun.com \
   -r backend/requirements.txt
 
+if ! id -u mkb >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin mkb
+fi
+chown -R mkb:mkb "$REMOTE_DIR"
+
 cat > /etc/systemd/system/mkb.service << UNIT
 [Unit]
 Description=MKB PubMed Q&A
@@ -178,6 +183,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=mkb
+Group=mkb
 WorkingDirectory=${REMOTE_DIR}
 EnvironmentFile=${REMOTE_DIR}/.env
 Environment=PYTHONUNBUFFERED=1
@@ -192,7 +199,6 @@ UNIT
 cat > /etc/nginx/conf.d/mkb.conf << NGINX
 server {
     listen ${PORT};
-    listen [::]:${PORT};
     server_name _;
     client_max_body_size 20m;
 
@@ -213,7 +219,7 @@ server {
         proxy_set_header Connection "";
         proxy_buffering off;
         proxy_cache off;
-        chunked_transfer_encoding off;
+        gzip off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }

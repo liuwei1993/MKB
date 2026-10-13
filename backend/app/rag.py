@@ -90,6 +90,19 @@ def build_chunks(
                         index=i,
                     )
                 )
+            abs_text = a.abstract.strip()
+            if abs_text:
+                if len(abs_text) > abstract_max_chars:
+                    abs_text = abs_text[: abstract_max_chars - 1] + "…"
+                chunks.append(
+                    Chunk(
+                        pmid=a.pmid,
+                        title=a.title,
+                        source="abstract",
+                        text=abs_text,
+                        index=len(parts),
+                    )
+                )
         else:
             abs_text = a.abstract.strip()
             if not abs_text:
@@ -116,6 +129,34 @@ def _cosine_sim(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return m @ q
 
 
+def _cap_per_pmid(chunks: list[Chunk], per_pmid: int) -> list[Chunk]:
+    counts: dict[str, int] = {}
+    kept: list[Chunk] = []
+    for chunk in chunks:
+        used = counts.get(chunk.pmid, 0)
+        if used >= per_pmid:
+            continue
+        counts[chunk.pmid] = used + 1
+        kept.append(chunk)
+    return kept
+
+
+def pick_diverse(chunks: list[Chunk], scores: np.ndarray, top_k: int, per_pmid: int = 4) -> list[Chunk]:
+    """Keep the highest-scoring chunks without letting one paper fill every slot."""
+    order = np.argsort(-scores)
+    picked: list[Chunk] = []
+    counts: dict[str, int] = {}
+    for idx in order:
+        chunk = chunks[int(idx)]
+        if counts.get(chunk.pmid, 0) >= per_pmid:
+            continue
+        picked.append(chunk)
+        counts[chunk.pmid] = counts.get(chunk.pmid, 0) + 1
+        if len(picked) >= top_k:
+            break
+    return picked
+
+
 async def retrieve_chunks(
     llm: LLMClient,
     question: str,
@@ -129,8 +170,7 @@ async def retrieve_chunks(
             "rag_retrieve chunks=%d <= top_k=%d 全部入选，未调用 embedding",
             len(chunks), top_k,
         )
-        # Still embed? Not necessary — return all
-        return chunks
+        return _cap_per_pmid(chunks, 4)
 
     texts = [c.text for c in chunks]
     # Embed query + documents; query first for a single batched-style flow
@@ -140,8 +180,7 @@ async def retrieve_chunks(
     q = np.asarray(q_vecs[0], dtype=np.float32)
     m = np.asarray(doc_vecs, dtype=np.float32)
     scores = _cosine_sim(q, m)
-    order = np.argsort(-scores)[:top_k]
-    picked = [chunks[int(i)] for i in order]
+    picked = pick_diverse(chunks, scores, top_k)
     _log_score_curve(chunks, scores, top_k, time.perf_counter() - t0)
     return picked
 

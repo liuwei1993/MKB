@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
-from .pubmed import Article, _normalize_pmcid
+from .pubmed import Article, _normalize_pmcid, is_retracted
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,11 @@ class PMCClient:
         Mutates articles in place. Returns count successfully fetched.
         """
         limit = self.settings.fulltext_max_articles
-        all_with_pmcid = [a for a in articles if _normalize_pmcid(a.pmcid)]
+        all_with_pmcid = [
+            a
+            for a in articles
+            if _normalize_pmcid(a.pmcid) and not is_retracted(a)
+        ]
         if candidates is None:
             candidates = all_with_pmcid[:limit]
         t0 = time.perf_counter()

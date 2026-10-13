@@ -692,7 +692,7 @@ function App() {
     setLoading(false)
     if (!sessionId || !last || last.error || last.stopped || !draft || draft.id !== last.id) return
     if (answerCommittedRef.current) {
-      patchSession(sessionId, last.id, { status: '' })
+      patchSession(sessionId, last.id, { status: '', phase: 'done' })
       return
     }
     const next = contextAfterStop(contextRef.current, draft)
@@ -856,12 +856,15 @@ function App() {
         let buffer = ''
         while (true) {
           const { done, value } = await reader.read()
-          if (done) break
-          if (!alive()) return
-          buffer += decoder.decode(value, { stream: true })
+          if (done) buffer += decoder.decode()
+          else {
+            if (!alive()) return
+            buffer += decoder.decode(value, { stream: true })
+          }
           const parts = buffer.split('\n\n')
-          buffer = parts.pop() || ''
-          for (const part of parts) {
+          buffer = done ? '' : parts.pop() || ''
+          const pending = done ? parts.filter((part) => part.trim()) : parts
+          for (const part of pending) {
             if (!alive()) return
             const line = part.split('\n').find((item) => item.startsWith('data:'))
             if (!line) continue
@@ -977,6 +980,7 @@ function App() {
               patch({ status: '', phase: 'done' })
             }
           }
+          if (done) break
         }
         if (alive() && !sawDone && !sawError) {
           patch({ stopped: true, status: '' })

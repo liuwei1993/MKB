@@ -1,4 +1,4 @@
-import type { ContextEnvelope } from './stopContext'
+import { contextAfterStop, type ContextEnvelope } from './stopContext.ts'
 
 export const STORAGE_KEY = 'mkb.sessions.v1'
 export const SESSION_LIMIT = 30
@@ -125,18 +125,31 @@ function normalizeSession(value: unknown): Session | null {
     return null
   }
   const turns = raw.turns.map(normalizeTurn).filter((turn): turn is ChatTurn => turn !== null)
-  return {
+  return foldStoppedTail({
     id: raw.id,
     title: raw.title,
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now(),
     turns,
     context: asContext(raw.context),
-  }
+  })
+}
+
+/** A reload mid-answer never runs the in-page Stop path, so fold that answer here. */
+function foldStoppedTail(session: Session): Session {
+  const last = session.turns.at(-1)
+  const answer = last?.answer.trim() ?? ''
+  if (!last?.stopped || !answer) return session
+  const current = session.context.last_answer ?? ''
+  const prefix = current.replace(/…$/, '')
+  if (prefix && answer.startsWith(prefix)) return session
+  return { ...session, context: contextAfterStop(session.context, last) }
 }
 
 /** Rephrase turns are not re-retrieved; keep the previous turn's evidence. */
 export function carryEvidence(turns: ChatTurn[], turnId: string): ChatTurn[] {
-  const prior = [...turns].reverse().find((turn) => turn.id !== turnId)
+  const index = turns.findIndex((turn) => turn.id === turnId)
+  if (index <= 0) return turns
+  const prior = [...turns.slice(0, index)].reverse().find((turn) => turn.articles.length > 0)
   if (!prior) return turns
   return turns.map((turn) =>
     turn.id === turnId
