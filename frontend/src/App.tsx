@@ -10,15 +10,11 @@ import {
   IconCopy,
   IconDown,
   IconDownload,
-  IconHome,
-  IconMenu,
   IconMic,
-  IconPanel,
   IconPlus,
   IconRefresh,
   IconSearch,
   IconSend,
-  IconShare,
   IconSpark,
   IconStop,
 } from './icons'
@@ -603,8 +599,6 @@ function App() {
   const [question, setQuestion] = useState('')
   const [loading, setLoading] = useState(false)
   const [examplePage, setExamplePage] = useState(0)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [collapsed, setCollapsed] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [citeFocus, setCiteFocus] = useState<{ turnId: string; pmid: string } | null>(null)
   const [expandedRefs, setExpandedRefs] = useState<Record<string, boolean>>({})
@@ -1006,7 +1000,6 @@ function App() {
     contextRef.current = EMPTY_CONTEXT
     setQuestion('')
     setPanelOpen(false)
-    setSidebarOpen(false)
     setCiteFocus(null)
     stick()
   }, [stick, stop])
@@ -1014,7 +1007,6 @@ function App() {
   const openSession = useCallback(
     (id: string) => {
       const switching = activeIdRef.current !== id
-      setSidebarOpen(false)
       if (!switching) return
       if (loadingRef.current) stop()
       const session = sessionsRef.current.find((item) => item.id === id)
@@ -1079,13 +1071,6 @@ function App() {
     URL.revokeObjectURL(url)
   }
 
-  const shareSession = async () => {
-    const text = turns.map((turn) => `# ${turn.question}\n\n${turn.answer}\n`).join('\n')
-    if (!(await writeClipboard(text))) return
-    setCopiedId('share')
-    window.setTimeout(() => setCopiedId((current) => (current === 'share' ? null : current)), 1600)
-  }
-
   const placeholder =
     turns.length > 0
       ? '继续追问，例如：那女性患者呢？或：把上一回答缩短'
@@ -1093,72 +1078,16 @@ function App() {
 
   return (
     <div className="shell">
-      {narrow && sidebarOpen && (
-        <button type="button" className="backdrop" aria-label="关闭菜单" onClick={() => setSidebarOpen(false)} />
-      )}
-      <aside className={`sidebar${sidebarOpen ? ' open' : ''}${collapsed && !narrow ? ' collapsed' : ''}`}>
-        <div className="side-top">
-          <div className="logo">
-            <span className="logo-mark">
-              <IconSpark />
-            </span>
-            <span className="logo-name">MKB</span>
-          </div>
-          <button
-            type="button"
-            className="collapse-btn"
-            aria-label={collapsed ? '展开侧栏' : '收起侧栏'}
-            onClick={() => setCollapsed((value) => !value)}
-          >
-            <IconPanel />
-          </button>
-        </div>
-        <button type="button" className={active ? 'nav-item' : 'nav-item active'} onClick={newChat}>
-          <IconHome />
-          <span>首页</span>
-        </button>
-        <button type="button" className="new-chat" onClick={newChat}>
-          <IconPlus />
-          <span>新对话</span>
-        </button>
-        <div className="side-label">历史记录</div>
-        {sessions.length === 0 ? (
-          <p className="side-empty">还没有对话</p>
-        ) : (
-          <ul className="history">
-            {sessions.map((session) => (
-              <li key={session.id} className={session.id === activeId ? 'history-item active' : 'history-item'}>
-                <button type="button" className="history-open" onClick={() => openSession(session.id)}>
-                  <span className="history-title">{session.title}</span>
-                  <span className="history-time">{formatWhen(session.updatedAt)}</span>
-                </button>
-                <button
-                  type="button"
-                  className="history-delete"
-                  aria-label={`删除 ${session.title}`}
-                  onClick={() => removeSession(session.id)}
-                >
-                  <IconClose />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </aside>
-
       <div className="main">
-        <div className="main-bar">
-          <button type="button" className="menu-btn" aria-label="打开菜单" onClick={() => setSidebarOpen(true)}>
-            <IconMenu />
-          </button>
-          <div className="main-title">{turns.length > 0 ? active?.title : ''}</div>
-          {turns.length > 0 && (
-            <button type="button" className="share-btn" onClick={() => void shareSession()}>
-              <IconShare />
-              {copiedId === 'share' ? '已复制' : '分享'}
+        {turns.length > 0 && (
+          <div className="main-bar">
+            <div className="main-title">{active?.title}</div>
+            <button type="button" className="new-chat" onClick={newChat}>
+              <IconPlus />
+              <span>新对话</span>
             </button>
-          )}
-        </div>
+          </div>
+        )}
 
         {turns.length === 0 ? (
           <div className="hero">
@@ -1177,6 +1106,29 @@ function App() {
               onSubmit={() => void ask(question)}
               onStop={stop}
             />
+            {sessions.length > 0 && (
+              <section className="history-card" aria-label="历史记录">
+                <div className="history-label">历史记录</div>
+                <ul className="history">
+                  {sessions.map((session) => (
+                    <li key={session.id} className="history-item">
+                      <button type="button" className="history-open" onClick={() => openSession(session.id)}>
+                        <span className="history-title">{session.title}</span>
+                        <span className="history-time">{formatWhen(session.updatedAt)}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="history-delete"
+                        aria-label={`删除 ${session.title}`}
+                        onClick={() => removeSession(session.id)}
+                      >
+                        <IconClose />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
             <section className="ask-card">
               <div className="ask-head">
                 <strong>可以这么问</strong>

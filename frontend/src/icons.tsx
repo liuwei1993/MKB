@@ -17,47 +17,11 @@ function svg(props: IconProps) {
   }
 }
 
-export function IconHome(props: IconProps) {
-  return (
-    <svg {...svg(props)}>
-      <path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5.2v-6.2H10.2V21H5a1 1 0 0 1-1-1z" />
-    </svg>
-  )
-}
-
 export function IconPlus(props: IconProps) {
   return (
     <svg {...svg(props)}>
       <circle cx="12" cy="12" r="8" />
       <path d="M12 8.5v7M8.5 12h7" />
-    </svg>
-  )
-}
-
-export function IconPanel(props: IconProps) {
-  return (
-    <svg {...svg(props)}>
-      <rect x="4" y="5" width="16" height="14" rx="2" />
-      <path d="M9 5v14" />
-    </svg>
-  )
-}
-
-export function IconMenu(props: IconProps) {
-  return (
-    <svg {...svg(props)}>
-      <path d="M5 7h14M5 12h14M5 17h14" />
-    </svg>
-  )
-}
-
-export function IconShare(props: IconProps) {
-  return (
-    <svg {...svg(props)}>
-      <circle cx="7" cy="12" r="2.2" />
-      <circle cx="16.5" cy="7.2" r="2.2" />
-      <circle cx="16.5" cy="16.8" r="2.2" />
-      <path d="m9 11 5.2-2.8M9 13l5.2 2.8" />
     </svg>
   )
 }
