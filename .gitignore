@@ -1,5 +1,6 @@
 .env
 .env-prod
+.server-info
 __pycache__/
 *.py[cod]
 .Python

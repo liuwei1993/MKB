@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # 一键构建并发布 MKB
-#   ./scripts/deploy.sh         公司机 lw@COMPANY_HOST:/data1/mkb （端口 9400，docker）
-#   ./scripts/deploy.sh harry   个人机 root@PERSONAL_HOST:/opt/mkb （端口 9001，systemd + nginx）
+#   ./scripts/deploy.sh         公司机（地址见 .server-info，端口 9400，docker）
+#   ./scripts/deploy.sh harry   个人机（地址见 .server-info，端口 9001，systemd + nginx）
 set -euo pipefail
 
 TARGET="${1:-}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+
+if [[ ! -f .server-info ]]; then
+  echo "缺少 .server-info，请复制 .server-info.example 并填写机器地址" >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+source .server-info
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -18,7 +25,7 @@ need npm
 
 if [[ "$TARGET" == "harry" ]]; then
   # 个人服务器。本机 ssh config 把该 IP 指到 52000，实际 sshd 在 22。
-  REMOTE="root@PERSONAL_HOST"
+  REMOTE="${HARRY_REMOTE:?.server-info 未设置 HARRY_REMOTE}"
   SSH_PORT=22
   REMOTE_DIR="/opt/mkb"
   PORT=9001
@@ -30,7 +37,7 @@ elif [[ -n "$TARGET" ]]; then
   echo "用法: $0 [harry]" >&2
   exit 1
 else
-  REMOTE="${REMOTE:-lw@COMPANY_HOST}"
+  REMOTE="${REMOTE:-${COMPANY_REMOTE:?.server-info 未设置 COMPANY_REMOTE}}"
   REMOTE_DIR="${REMOTE_DIR:-/data1/mkb}"
   OLD_REMOTE_DIR="${OLD_REMOTE_DIR:-~/mkb}"
   PORT="${PORT:-9400}"
@@ -79,6 +86,7 @@ sync_code() {
     --exclude '.mypy_cache/' \
     --exclude '.DS_Store' \
     --exclude '.env-prod' \
+    --exclude '.server-info' \
     "$ROOT/" "${REMOTE}:${REMOTE_DIR}/"
 }
 
@@ -150,6 +158,7 @@ deploy_harry() {
     --exclude '.DS_Store' \
     --exclude '.env' \
     --exclude '.env-prod' \
+    --exclude '.server-info' \
     "$ROOT/" "${REMOTE}:${REMOTE_DIR}/"
 
   log "写入远端环境变量（${ENV_FILE}）"

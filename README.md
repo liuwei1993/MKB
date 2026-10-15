@@ -63,12 +63,12 @@ curl http://127.0.0.1:8000/api/health
 
 ## 发布到服务器
 
-一键构建前端并部署到 `lw@COMPANY_HOST:/data1/mkb`（对外端口 **9400**）：
+一键构建前端并部署到公司机（地址见本地 `.server-info`，目录 `/data1/mkb`，对外端口 **9400**）：
 
 ```bash
 ./scripts/deploy.sh
 ```
 
-访问：http://COMPANY_HOST:9400/
+访问：`http://<公司机地址>:9400/`
 
-可选环境变量：`REMOTE`、`REMOTE_DIR`、`PORT`（默认如上）。
+可选环境变量：`REMOTE`、`REMOTE_DIR`、`PORT`（主机默认见 `.server-info`）。
