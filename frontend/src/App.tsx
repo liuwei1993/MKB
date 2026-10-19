@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { citationOrder, linkifyCitations } from './citations'
+import { exportMarkdown } from './exportMarkdown'
 import {
   IconChat,
   IconCheck,
@@ -1060,7 +1061,7 @@ function App() {
   }
 
   const downloadTurn = (turn: ChatTurn) => {
-    const blob = new Blob([`# ${turn.question}\n\n${turn.answer}\n`], {
+    const blob = new Blob([exportMarkdown(turn)], {
       type: 'text/markdown;charset=utf-8',
     })
     const url = URL.createObjectURL(blob)
