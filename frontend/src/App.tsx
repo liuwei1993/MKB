@@ -388,7 +388,7 @@ function RefCard({
   onToggle: (pmid: string) => void
 }) {
   const label = pubTypeLabel(article?.pub_types)
-  const retracted = (article?.pub_types ?? []).includes('Retracted Publication')
+  const retracted = label === '已撤稿'
   const cites = passages.length
   const showPending =
     translating && !article?.title_zh && needsTitleTranslation(article?.title || '')
@@ -396,16 +396,11 @@ function RefCard({
     <article id={`ref-${turnId}-${pmid}`} className={active ? 'ref-card active' : 'ref-card'}>
       <div className="ref-kicker">
         {number != null && <span>{number}.</span>}
-        <span className="pmid-badge">PubMed</span>
+        <span className={retracted ? 'pmid-badge retracted' : 'pmid-badge'}>{label}</span>
       </div>
       <p className="title">{article?.title || `PMID:${pmid}`}</p>
       {article?.title_zh && <p className="title-zh">{article.title_zh}</p>}
       {showPending && <p className="title-zh title-zh-pending">翻译中…</p>}
-      {label && (
-        <span className={retracted ? 'pub-type retracted' : 'pub-type'}>
-          {label}
-        </span>
-      )}
       {article ? (
         <p className="meta">
           {[article.journal, article.year, article.authors].filter(Boolean).join(' · ')}

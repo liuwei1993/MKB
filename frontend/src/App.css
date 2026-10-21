@@ -837,6 +837,12 @@
   color: var(--accent);
   font-size: 0.72rem;
   font-weight: 650;
+  white-space: nowrap;
+}
+
+.pmid-badge.retracted {
+  background: #fff1f0;
+  color: #cf1322;
 }
 
 .ref-card .title {
@@ -872,21 +878,6 @@
 
 .ref-card a:hover {
   text-decoration: underline;
-}
-
-.pub-type {
-  display: inline-block;
-  margin-bottom: 4px;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: #f2f3f5;
-  color: #4e5969;
-  font-size: 0.72rem;
-}
-
-.pub-type.retracted {
-  background: #fff1f0;
-  color: #cf1322;
 }
 
 .expand-row {
