@@ -387,8 +387,10 @@ function RefCard({
   translating: boolean
   onToggle: (pmid: string) => void
 }) {
-  const label = pubTypeLabel(article?.pub_types)
-  const retracted = label === '已撤稿'
+  const label = article ? pubTypeLabel(article.pub_types) : ''
+  const retracted = (article?.pub_types ?? []).some(
+    (item) => item.trim() === 'Retracted Publication',
+  )
   const cites = passages.length
   const showPending =
     translating && !article?.title_zh && needsTitleTranslation(article?.title || '')
@@ -396,7 +398,9 @@ function RefCard({
     <article id={`ref-${turnId}-${pmid}`} className={active ? 'ref-card active' : 'ref-card'}>
       <div className="ref-kicker">
         {number != null && <span>{number}.</span>}
-        <span className={retracted ? 'pmid-badge retracted' : 'pmid-badge'}>{label}</span>
+        {label && (
+          <span className={retracted ? 'pmid-badge retracted' : 'pmid-badge'}>{label}</span>
+        )}
       </div>
       <p className="title">{article?.title || `PMID:${pmid}`}</p>
       {article?.title_zh && <p className="title-zh">{article.title_zh}</p>}

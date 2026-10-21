@@ -8,6 +8,7 @@ describe('pubTypeLabel', () => {
       pubTypeLabel(['Journal Article', 'Retracted Publication', 'Review']),
       '已撤稿',
     )
+    assert.equal(pubTypeLabel([' Retracted Publication ']), '已撤稿')
   })
 
   it('prefers 专家共识 over a co-tagged guideline', () => {
@@ -25,9 +26,13 @@ describe('pubTypeLabel', () => {
     )
   })
 
-  it('maps guideline publication types to 指南', () => {
+  it('maps guideline publication types to 指南 ahead of a systematic review', () => {
     assert.equal(pubTypeLabel(['Guideline', 'Journal Article']), '指南')
     assert.equal(pubTypeLabel(['Practice Guideline']), '指南')
+    assert.equal(
+      pubTypeLabel(['Practice Guideline', 'Systematic Review', 'Journal Article']),
+      '指南',
+    )
   })
 
   it('maps systematic reviews and meta-analyses ahead of Review', () => {
@@ -37,6 +42,10 @@ describe('pubTypeLabel', () => {
     )
     assert.equal(pubTypeLabel(['Meta-Analysis', 'Review']), '系统评价/Meta分析')
     assert.equal(pubTypeLabel(['Network Meta-Analysis']), '系统评价/Meta分析')
+    assert.equal(
+      pubTypeLabel(['Randomized Controlled Trial', 'Meta-Analysis']),
+      '系统评价/Meta分析',
+    )
   })
 
   it('folds trial designs into 临床试验 ahead of Journal Article', () => {
@@ -49,10 +58,12 @@ describe('pubTypeLabel', () => {
     assert.equal(pubTypeLabel(['Pragmatic Clinical Trial']), '临床试验')
     assert.equal(pubTypeLabel(['Adaptive Clinical Trial']), '临床试验')
     assert.equal(pubTypeLabel(['Equivalence Trial']), '临床试验')
+    assert.equal(pubTypeLabel(['Review', 'Clinical Trial']), '临床试验')
   })
 
   it('maps a plain review to 综述', () => {
     assert.equal(pubTypeLabel(['Journal Article', 'Review']), '综述')
+    assert.equal(pubTypeLabel(['  Review  ']), '综述')
   })
 
   it('uses 原创研究论文 for other and missing types', () => {
@@ -60,6 +71,8 @@ describe('pubTypeLabel', () => {
     assert.equal(pubTypeLabel(['Observational Study']), '原创研究论文')
     assert.equal(pubTypeLabel(['Case Reports']), '原创研究论文')
     assert.equal(pubTypeLabel(['Editorial']), '原创研究论文')
+    assert.equal(pubTypeLabel(['Letter']), '原创研究论文')
+    assert.equal(pubTypeLabel(['Consensus Statement']), '原创研究论文')
     assert.equal(pubTypeLabel([]), '原创研究论文')
     assert.equal(pubTypeLabel(undefined), '原创研究论文')
   })
