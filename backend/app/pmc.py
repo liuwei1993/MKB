@@ -17,6 +17,56 @@ logger = logging.getLogger(__name__)
 BIOC_BASE = "https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_json"
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
+# A short token before a period is an abbreviation, not the end of a sentence.
+_ABBREVS = {
+    "al",
+    "approx",
+    "ca",
+    "cf",
+    "co",
+    "dept",
+    "dr",
+    "ed",
+    "eds",
+    "eq",
+    "eqs",
+    "fig",
+    "figs",
+    "gen",
+    "inc",
+    "jr",
+    "ltd",
+    "mr",
+    "mrs",
+    "ms",
+    "mt",
+    "no",
+    "nos",
+    "pp",
+    "prof",
+    "sr",
+    "st",
+    "vol",
+    "vs",
+}
+_CITE_RUN = (
+    r"\d{1,3}(?:\s*[-–—]\s*\d{1,3})?"
+    r"(?:(?:\s*[,，、;；]\s*|\s+)\d{1,3}(?:\s*[-–—]\s*\d{1,3})?)*"
+)
+_BRACKET_CITE = re.compile(
+    r"\s*[\[［]\s*\d{1,3}(?:\s*[-–—,~，、;；]\s*\d{1,3})*\s*[\]］]"
+)
+_PAREN_CITE = re.compile(
+    r"\s*[（(]\s*\d{1,3}(?:\s*[,，、;；]\s*\d{1,3})+\s*[)）]"
+)
+_AFTER_PUNCT = re.compile(
+    rf"(?P<word>[A-Za-z]{{0,12}})(?<!\d)"
+    rf"(?P<punct>[.!?。！？,，;；:：])\s+"
+    rf"(?P<run>{_CITE_RUN})"
+    rf"(?=\s|$|[\u4e00-\u9fff])"
+)
+_THOUSAND_SEP = r"[ \u00a0\u202f\u2009]"
+
 # BioC section types that are usually not useful for RAG
 _SKIP_TYPES = {
     "ref",
@@ -173,6 +223,101 @@ class PMCClient:
         return _parse_pmc_xml(r.text)
 
 
+def _is_thousands(run: str) -> bool:
+    """True for one number written with groups of three digits, such as 26 145."""
+    parts = re.split(_THOUSAND_SEP + "+", run.strip())
+    if len(parts) < 2 or any(not part.isdigit() for part in parts):
+        return False
+    return all(len(part) == 3 for part in parts[1:])
+
+
+def _keep_citation_run(text: str, match: re.Match[str]) -> bool:
+    word = match.group("word")
+    if word:
+        start = match.start("word")
+        if (start == 0 or not text[start - 1].isalpha()) and word.lower() in _ABBREVS:
+            return True
+    if _is_thousands(match.group("run")):
+        return True
+    nxt = re.match(r"\s*(\S)", text[match.end() :])
+    if nxt is None:
+        return False
+    ch = nxt.group(1)
+    if ch.isdigit() or ch in "%‰/":
+        return True
+    return ch.isascii() and ch.islower()
+
+
+def strip_inline_citations(text: str) -> str:
+    """Drop bibliography markers that were flattened into the prose.
+
+    Keeps ages, measurements, percentages, and numbers grouped by thousands.
+    """
+    if not text:
+        return text
+    source = _PAREN_CITE.sub("", _BRACKET_CITE.sub("", text))
+
+    def repl(match: re.Match[str]) -> str:
+        if _keep_citation_run(source, match):
+            return match.group(0)
+        return f"{match.group('word')}{match.group('punct')} "
+
+    cleaned = _AFTER_PUNCT.sub(repl, source)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.;:!?，。；：！？])", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _remove_keep_tail(parent: ET.Element, child: ET.Element) -> None:
+    """Remove an element without discarding the sentence that follows it."""
+    tail = child.tail or ""
+    children = list(parent)
+    index = children.index(child)
+    if tail:
+        if index == 0:
+            parent.text = (parent.text or "") + tail
+        else:
+            prev = children[index - 1]
+            prev.tail = (prev.tail or "") + tail
+    parent.remove(child)
+
+
+def _is_bibr_xref(el: ET.Element) -> bool:
+    return el.tag == "xref" and (el.get("ref-type") or "").lower() == "bibr"
+
+
+def _previous_text(parent: ET.Element, el: ET.Element) -> str:
+    children = list(parent)
+    index = children.index(el)
+    if index == 0:
+        return parent.text or ""
+    prev = children[index - 1]
+    if prev.tail:
+        return prev.tail
+    return "".join(prev.itertext())
+
+
+def _is_citation_sup(parent: ET.Element, el: ET.Element) -> bool:
+    if el.tag != "sup" or parent.tag == "xref":
+        return False
+    inner = "".join(el.itertext()).strip()
+    if not re.fullmatch(r"\d{1,3}(?:\s*[-–—,]\s*\d{1,3})*", inner):
+        return False
+    prev = _previous_text(parent, el)
+    return not (prev and prev[-1].isdigit())
+
+
+def _drop_citation_markers(root: ET.Element) -> None:
+    for parent in list(root.iter()):
+        for child in list(parent):
+            if _is_bibr_xref(child):
+                _remove_keep_tail(parent, child)
+    for parent in list(root.iter()):
+        for child in list(parent):
+            if _is_citation_sup(parent, child):
+                _remove_keep_tail(parent, child)
+
+
 def _parse_bioc(data: Any) -> str | None:
     """Extract body paragraphs from BioC JSON (list or dict forms)."""
     documents: list[dict] = []
@@ -196,7 +341,7 @@ def _parse_bioc(data: Any) -> str | None:
         for passage in doc.get("passages") or []:
             if not isinstance(passage, dict):
                 continue
-            text = (passage.get("text") or "").strip()
+            text = strip_inline_citations((passage.get("text") or "").strip())
             if not text:
                 continue
             infons = passage.get("infons") or {}
@@ -232,15 +377,17 @@ def _parse_pmc_xml(xml_text: str) -> str | None:
 
     body = root.find(".//body")
     target = body if body is not None else root
+    _drop_citation_markers(target)
     parts: list[str] = []
     for p in target.iter("p"):
-        text = "".join(p.itertext()).strip()
-        text = re.sub(r"\s+", " ", text)
+        text = strip_inline_citations(re.sub(r"\s+", " ", "".join(p.itertext())).strip())
         if text:
             parts.append(text)
     if not parts:
         # Fallback: all text
-        text = re.sub(r"\s+", " ", "".join(target.itertext())).strip()
+        text = strip_inline_citations(
+            re.sub(r"\s+", " ", "".join(target.itertext())).strip()
+        )
         return text or None
     return "\n\n".join(parts)
 
