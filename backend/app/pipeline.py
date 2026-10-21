@@ -657,7 +657,7 @@ async def _retrieve_evidence(
     priority_query: str | None,
     question_type: str,
 ) -> AsyncIterator[dict[str, Any]]:
-    yield _status("正在检索 PubMed…", "search")
+    yield _status("正在检索文献…", "search")
     articles = await pubmed.search_articles(queries, priority_query=priority_query)
     if not articles:
         yield {

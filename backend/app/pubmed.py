@@ -51,11 +51,11 @@ class Article:
         if pmc:
             return (
                 f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmc}/",
-                "全文 (PMC)",
+                "全文",
             )
         if self.doi.strip():
-            return (f"https://doi.org/{self.doi.strip()}", "原文 (DOI)")
-        return (f"https://pubmed.ncbi.nlm.nih.gov/{self.pmid}/", "PubMed")
+            return (f"https://doi.org/{self.doi.strip()}", "原文")
+        return (f"https://pubmed.ncbi.nlm.nih.gov/{self.pmid}/", "文献")
 
     def to_meta(self) -> dict:
         url, url_label = self.preferred_url()

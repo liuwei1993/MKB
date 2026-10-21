@@ -122,6 +122,17 @@ function sourceLabel(source: string): string {
   return source === 'fulltext' ? '全文' : '摘要'
 }
 
+function articleTitle(article: ArticleMeta | undefined): string {
+  return article?.title?.trim() || '文献'
+}
+
+function articleLinkLabel(article: ArticleMeta): string {
+  const raw = (article.url_label || '').trim()
+  if (/pmc/i.test(raw) || raw === '全文') return '全文'
+  if (/doi/i.test(raw) || raw === '原文') return '原文'
+  return '文献'
+}
+
 async function writeClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text)
@@ -402,7 +413,7 @@ function RefCard({
           <span className={retracted ? 'pmid-badge retracted' : 'pmid-badge'}>{label}</span>
         )}
       </div>
-      <p className="title">{article?.title || `PMID:${pmid}`}</p>
+      <p className="title">{articleTitle(article)}</p>
       {article?.title_zh && <p className="title-zh">{article.title_zh}</p>}
       {showPending && <p className="title-zh title-zh-pending">翻译中…</p>}
       {article ? (
@@ -415,7 +426,7 @@ function RefCard({
       )}
       {article && (
         <a href={article.url} target="_blank" rel="noreferrer">
-          {article.url_label || 'PubMed'} · PMID:{article.pmid}
+          {articleLinkLabel(article)}
         </a>
       )}
       <div className="expand-row">
@@ -1194,7 +1205,7 @@ function App() {
                           <ol>
                             {visibleRefs.map((item) => (
                               <li key={item.pmid}>
-                                {item.article?.title_zh || item.article?.title || `PMID:${item.pmid}`}
+                                {item.article?.title_zh || articleTitle(item.article)}
                               </li>
                             ))}
                           </ol>
@@ -1315,7 +1326,7 @@ function App() {
             />
           </div>
         )}
-        <p className="footer">MKB 基于 PubMed 文献作答，生成内容供参考，不能替代临床诊疗。</p>
+        <p className="footer">MKB 基于文献作答，生成内容供参考，不能替代临床诊疗。</p>
       </div>
 
       {showAside && panelTurn && (
