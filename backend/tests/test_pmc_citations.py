@@ -1,6 +1,11 @@
 import unittest
 
-from backend.app.pmc import _parse_bioc, _parse_pmc_xml, strip_inline_citations
+from backend.app.pmc import (
+    _parse_bioc,
+    _parse_pmc_xml,
+    join_paragraphs,
+    strip_inline_citations,
+)
 
 XML = """
 <article>
@@ -20,9 +25,10 @@ XML = """
 
 class PmcCitationXmlTest(unittest.TestCase):
     def test_bibr_markers_drop_out_without_taking_the_following_sentence(self):
-        text = _parse_pmc_xml(XML)
-        self.assertIsNotNone(text)
-        assert text is not None
+        paras = _parse_pmc_xml(XML)
+        self.assertIsNotNone(paras)
+        assert paras is not None
+        text = join_paragraphs(paras)
         self.assertIn(
             "We compared the effect sizes. The associations were examined in this population, and they are included only for comparison.",
             text,
@@ -43,7 +49,7 @@ class PmcCitationXmlTest(unittest.TestCase):
         self.assertNotRegex(text, r"previously\.\s*16")
 
     def test_measurements_sample_sizes_and_figure_labels_stay(self):
-        text = _parse_pmc_xml(XML) or ""
+        text = join_paragraphs(_parse_pmc_xml(XML) or [])
         self.assertIn("25-44 years old", text)
         self.assertIn("16-19 years of age", text)
         self.assertIn("26 145 (2.3%)", text)
@@ -117,8 +123,11 @@ class InlineCitationTest(unittest.TestCase):
                 }
             ]
         }
-        text = _parse_bioc(data) or ""
-        self.assertEqual(text, "pressure. The associations were examined. Next.")
+        paras = _parse_bioc(data) or []
+        self.assertEqual(
+            join_paragraphs(paras),
+            "pressure. The associations were examined. Next.",
+        )
 
 
 if __name__ == "__main__":

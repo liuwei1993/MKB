@@ -11,6 +11,25 @@ from .pubmed import Article
 
 logger = logging.getLogger(__name__)
 
+_SECTION_LABEL_ZH = {
+    "intro": "引言",
+    "methods": "方法",
+    "results": "结果",
+    "discuss": "讨论",
+    "abstract": "摘要",
+    "other": "其他",
+}
+
+# Additive cosine boost by question_type × section. Empty section → 0.
+_SECTION_BOOST: dict[str, dict[str, float]] = {
+    "treatment": {"results": 0.12, "discuss": 0.08, "methods": -0.04, "intro": 0.0},
+    "prevention": {"results": 0.12, "discuss": 0.08, "methods": -0.04, "intro": 0.0},
+    "diagnosis": {"results": 0.10, "methods": 0.10, "discuss": 0.04, "intro": 0.0},
+    "prognosis": {"results": 0.12, "discuss": 0.08, "methods": -0.02, "intro": 0.0},
+    "etiology": {"discuss": 0.10, "results": 0.08, "intro": 0.04, "methods": 0.0},
+    "mechanism": {"intro": 0.08, "discuss": 0.10, "methods": 0.04, "results": 0.0},
+}
+
 
 @dataclass
 class Chunk:
@@ -19,6 +38,17 @@ class Chunk:
     source: str  # "fulltext" | "abstract"
     text: str
     index: int
+    section: str = ""
+
+
+def section_label_zh(section: str) -> str:
+    return _SECTION_LABEL_ZH.get(section, "")
+
+
+def section_boost(question_type: str, section: str) -> float:
+    if not section:
+        return 0.0
+    return float(_SECTION_BOOST.get(question_type, {}).get(section, 0.0))
 
 
 def chunk_text(text: str, size: int, overlap: int) -> list[str]:
@@ -52,7 +82,6 @@ def chunk_text(text: str, size: int, overlap: int) -> list[str]:
     if buf:
         pieces.append(buf)
 
-    # Merge tiny trailing pieces and ensure overlap between windows when needed
     return [p for p in pieces if p.strip()]
 
 
@@ -69,6 +98,31 @@ def _sliding_window(text: str, size: int, overlap: int) -> list[str]:
     return out
 
 
+def _chunk_paragraphs(
+    paras: list[tuple[str, str]],
+    size: int,
+    overlap: int,
+) -> list[tuple[str, str]]:
+    """Pack paragraphs without crossing section boundaries."""
+    if not paras:
+        return []
+    out: list[tuple[str, str]] = []
+    # Group consecutive paragraphs that share the same section key.
+    groups: list[tuple[str, list[str]]] = []
+    for section, text in paras:
+        text = text.strip()
+        if not text:
+            continue
+        if groups and groups[-1][0] == section:
+            groups[-1][1].append(text)
+        else:
+            groups.append((section, [text]))
+    for section, texts in groups:
+        for part in chunk_text("\n\n".join(texts), size, overlap):
+            out.append((section, part))
+    return out
+
+
 def build_chunks(
     articles: list[Article],
     *,
@@ -78,9 +132,15 @@ def build_chunks(
 ) -> list[Chunk]:
     chunks: list[Chunk] = []
     for a in articles:
-        if a.has_fulltext and a.fulltext.strip():
-            parts = chunk_text(a.fulltext, chunk_size, chunk_overlap)
-            for i, part in enumerate(parts):
+        if a.has_fulltext and (a.fulltext_paras or a.fulltext.strip()):
+            if a.fulltext_paras:
+                parts = _chunk_paragraphs(a.fulltext_paras, chunk_size, chunk_overlap)
+            else:
+                parts = [
+                    ("", part)
+                    for part in chunk_text(a.fulltext, chunk_size, chunk_overlap)
+                ]
+            for i, (section, part) in enumerate(parts):
                 chunks.append(
                     Chunk(
                         pmid=a.pmid,
@@ -88,6 +148,7 @@ def build_chunks(
                         source="fulltext",
                         text=part,
                         index=i,
+                        section=section,
                     )
                 )
             abs_text = a.abstract.strip()
@@ -101,6 +162,7 @@ def build_chunks(
                         source="abstract",
                         text=abs_text,
                         index=len(parts),
+                        section="abstract",
                     )
                 )
         else:
@@ -117,6 +179,7 @@ def build_chunks(
                     source="abstract",
                     text=abs_text,
                     index=0,
+                    section="abstract" if a.abstract.strip() else "",
                 )
             )
     return chunks
@@ -162,6 +225,7 @@ async def retrieve_chunks(
     question: str,
     chunks: list[Chunk],
     top_k: int,
+    question_type: str = "",
 ) -> list[Chunk]:
     if not chunks:
         return []
@@ -180,13 +244,23 @@ async def retrieve_chunks(
     q = np.asarray(q_vecs[0], dtype=np.float32)
     m = np.asarray(doc_vecs, dtype=np.float32)
     scores = _cosine_sim(q, m)
+    if question_type:
+        boosts = np.asarray(
+            [section_boost(question_type, c.section) for c in chunks],
+            dtype=np.float32,
+        )
+        scores = scores + boosts
     picked = pick_diverse(chunks, scores, top_k)
-    _log_score_curve(chunks, scores, top_k, time.perf_counter() - t0)
+    _log_score_curve(chunks, scores, top_k, time.perf_counter() - t0, question_type)
     return picked
 
 
 def _log_score_curve(
-    chunks: list[Chunk], scores: np.ndarray, top_k: int, elapsed: float
+    chunks: list[Chunk],
+    scores: np.ndarray,
+    top_k: int,
+    elapsed: float,
+    question_type: str = "",
 ) -> None:
     """打印 top_k 前后的相似度衰减，用于评估调大 RAG_TOP_K 的边际收益。"""
     n = len(chunks)
@@ -194,11 +268,18 @@ def _log_score_curve(
     s_sorted = np.sort(scores)[::-1]
     selected = np.argsort(-scores)[:k]
     ft_sel = sum(1 for i in selected if chunks[int(i)].source == "fulltext")
+    section_counts: dict[str, int] = {}
+    for i in selected:
+        key = chunks[int(i)].section or "-"
+        section_counts[key] = section_counts.get(key, 0) + 1
     after = [round(float(x), 4) for x in s_sorted[k : k + 5]]
     logger.info(
         "rag_retrieve chunks=%d top_k=%d selected_fulltext=%d/%d "
+        "question_type=%s sections=%s "
         "score_top1=%.4f score_at_k=%.4f scores_after_k=%s elapsed=%.2fs",
         n, k, ft_sel, k,
+        question_type or "-",
+        section_counts,
         float(s_sorted[0]), float(s_sorted[k - 1]), after, elapsed,
     )
 
@@ -211,6 +292,9 @@ def format_rag_evidence(chunks: list[Chunk], articles: list[Article]) -> str:
         journal = f"{a.journal} ({a.year})" if a else ""
         authors = a.authors if a else ""
         source_label = "全文" if c.source == "fulltext" else "摘要"
+        sec = section_label_zh(c.section)
+        if sec:
+            source_label = f"{source_label}·{sec}"
         type_line = ""
         if a and a.pub_types:
             type_line = f"Type: {', '.join(a.pub_types)}\n"

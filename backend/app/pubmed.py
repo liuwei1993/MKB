@@ -44,6 +44,8 @@ class Article:
     pub_types: list[str] = field(default_factory=list)
     has_fulltext: bool = False
     fulltext: str = field(default="", repr=False)
+    # (section, paragraph) from PMC; empty section means unstructured XML fallback.
+    fulltext_paras: list[tuple[str, str]] = field(default_factory=list, repr=False)
 
     def preferred_url(self) -> tuple[str, str]:
         """Return (url, url_label) preferring PMC full text, then DOI, then PubMed."""

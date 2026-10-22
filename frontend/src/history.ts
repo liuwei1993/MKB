@@ -29,6 +29,7 @@ export type Passage = {
   pmid: string
   source: string
   text: string
+  section?: string
 }
 
 export type ChatTurn = {

@@ -266,8 +266,24 @@
 }
 
 .mark.active {
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 4px var(--accent);
+  border-color: var(--accent-soft);
+  border-top-color: var(--accent);
+  box-shadow: none;
+  animation: mark-spin 0.7s linear infinite;
+}
+
+@keyframes mark-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mark.active {
+    animation: none;
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 4px var(--accent);
+  }
 }
 
 .mark.stopped {
@@ -874,6 +890,7 @@
   color: var(--accent);
   font-size: 0.8rem;
   text-decoration: none;
+  overflow-wrap: anywhere;
 }
 
 .ref-card a:hover {

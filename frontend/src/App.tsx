@@ -118,8 +118,19 @@ function stepState(
   return 'done'
 }
 
-function sourceLabel(source: string): string {
-  return source === 'fulltext' ? '全文' : '摘要'
+const SECTION_LABEL: Record<string, string> = {
+  intro: '引言',
+  methods: '方法',
+  results: '结果',
+  discuss: '讨论',
+  abstract: '摘要',
+  other: '其他',
+}
+
+function sourceLabel(source: string, section?: string): string {
+  const base = source === 'fulltext' ? '全文' : '摘要'
+  const sec = SECTION_LABEL[section || '']
+  return sec ? `${base} · ${sec}` : base
 }
 
 function articleTitle(article: ArticleMeta | undefined): string {
@@ -127,10 +138,14 @@ function articleTitle(article: ArticleMeta | undefined): string {
 }
 
 function articleLinkLabel(article: ArticleMeta): string {
-  const raw = (article.url_label || '').trim()
-  if (/pmc/i.test(raw) || raw === '全文') return '全文'
-  if (/doi/i.test(raw) || raw === '原文') return '原文'
-  return '文献'
+  const doi = (article.doi || '')
+    .trim()
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
+    .replace(/^doi:\s*/i, '')
+  if (doi) return `DOI:${doi}`
+  const pmc = (article.pmcid || '').trim()
+  if (pmc) return /^pmc/i.test(pmc) ? pmc.toUpperCase() : `PMC${pmc}`
+  return `PMID:${article.pmid}`
 }
 
 async function writeClipboard(text: string): Promise<boolean> {
@@ -439,7 +454,7 @@ function RefCard({
       {active && passages.length > 0 &&
         passages.map((passage, index) => (
           <blockquote key={`${passage.source}-${index}`} className="passage">
-            <span>{sourceLabel(passage.source)}</span>
+            <span>{sourceLabel(passage.source, passage.section)}</span>
             <p>{passage.text}</p>
           </blockquote>
         ))}
@@ -1188,9 +1203,6 @@ function App() {
                         turn.standalone !== turn.question && (
                           <p className="queries">理解为本轮问题：{turn.standalone}</p>
                         )}
-                      {turn.queries.length > 0 && (
-                        <p className="queries">检索词：{turn.queries.join(' · ')}</p>
-                      )}
                       {turn.retrieval === false && !turn.error && (
                         <p className="queries">本轮未重新检索文献</p>
                       )}

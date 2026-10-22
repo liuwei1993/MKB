@@ -67,7 +67,7 @@ _AFTER_PUNCT = re.compile(
 )
 _THOUSAND_SEP = r"[ \u00a0\u202f\u2009]"
 
-# BioC section types that are usually not useful for RAG
+# BioC passage `type` values that are usually not useful for RAG
 _SKIP_TYPES = {
     "ref",
     "references",
@@ -80,7 +80,65 @@ _SKIP_TYPES = {
     "table_caption",
     "fig_caption",
     "title",  # article title often duplicated
+    "front",
 }
+
+_SECTION_ALIASES = {
+    "intro": "intro",
+    "introduction": "intro",
+    "background": "intro",
+    "methods": "methods",
+    "method": "methods",
+    "materials": "methods",
+    "materials_and_methods": "methods",
+    "materialsandmethods": "methods",
+    "results": "results",
+    "result": "results",
+    "discuss": "discuss",
+    "discussion": "discuss",
+    "concl": "discuss",
+    "conclusion": "discuss",
+    "conclusions": "discuss",
+    "abstract": "abstract",
+}
+
+
+def normalize_section(raw: str) -> str:
+    """Map BioC section_type to a small set of keys; empty means unknown."""
+    key = (raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not key:
+        return ""
+    return _SECTION_ALIASES.get(key, "other")
+
+
+def join_paragraphs(paras: list[tuple[str, str]]) -> str:
+    return "\n\n".join(text for _section, text in paras if text.strip())
+
+
+def _truncate_paragraphs(
+    paras: list[tuple[str, str]], max_chars: int
+) -> list[tuple[str, str]]:
+    if max_chars <= 0 or not paras:
+        return []
+    out: list[tuple[str, str]] = []
+    used = 0
+    for section, text in paras:
+        text = text.strip()
+        if not text:
+            continue
+        gap = 2 if out else 0
+        if used + gap >= max_chars:
+            break
+        room = max_chars - used - gap
+        if len(text) <= room:
+            out.append((section, text))
+            used += gap + len(text)
+            continue
+        clipped = text[: max(0, room - 1)].rstrip() + "…"
+        if clipped.strip("…"):
+            out.append((section, clipped))
+        break
+    return out
 
 
 class PMCClient:
@@ -106,20 +164,26 @@ class PMCClient:
             params["api_key"] = self.settings.ncbi_api_key
         return params
 
-    async def fetch_fulltext(self, pmcid: str) -> str | None:
-        """Fetch OA full text; return None if unavailable."""
+    async def fetch_fulltext_paras(
+        self, pmcid: str
+    ) -> list[tuple[str, str]] | None:
+        """Fetch OA full-text paragraphs as (section, text); None if unavailable."""
         pmc = _normalize_pmcid(pmcid)
         if not pmc:
             return None
-        text = await self._fetch_bioc(pmc)
-        if not text:
-            text = await self._fetch_pmc_xml(pmc)
-        if not text:
+        paras = await self._fetch_bioc(pmc)
+        if not paras:
+            paras = await self._fetch_pmc_xml(pmc)
+        if not paras:
             return None
-        max_chars = self.settings.fulltext_max_chars
-        if len(text) > max_chars:
-            text = text[: max_chars - 1] + "…"
-        return text.strip() or None
+        return _truncate_paragraphs(paras, self.settings.fulltext_max_chars) or None
+
+    async def fetch_fulltext(self, pmcid: str) -> str | None:
+        """Fetch OA full text; return None if unavailable."""
+        paras = await self.fetch_fulltext_paras(pmcid)
+        if not paras:
+            return None
+        return join_paragraphs(paras) or None
 
     async def attach_fulltexts(
         self,
@@ -149,12 +213,13 @@ class PMCClient:
         async def one(article: Article) -> bool:
             async with sem:
                 try:
-                    text = await self.fetch_fulltext(article.pmcid)
+                    paras = await self.fetch_fulltext_paras(article.pmcid)
                 except Exception:
-                    text = None
+                    paras = None
                 await asyncio.sleep(0.12)
-                if text:
-                    article.fulltext = text
+                if paras:
+                    article.fulltext_paras = paras
+                    article.fulltext = join_paragraphs(paras)
                     article.has_fulltext = True
                     return True
                 return False
@@ -182,7 +247,7 @@ class PMCClient:
         )
         return fetched
 
-    async def _fetch_bioc(self, pmcid: str) -> str | None:
+    async def _fetch_bioc(self, pmcid: str) -> list[tuple[str, str]] | None:
         assert self._client is not None
         # API accepts PMCID with or without PMC prefix
         url = f"{BIOC_BASE}/{pmcid}/unicode"
@@ -204,7 +269,7 @@ class PMCClient:
             return None
         return _parse_bioc(data)
 
-    async def _fetch_pmc_xml(self, pmcid: str) -> str | None:
+    async def _fetch_pmc_xml(self, pmcid: str) -> list[tuple[str, str]] | None:
         assert self._client is not None
         # efetch wants numeric id without PMC prefix
         numeric = pmcid[3:] if pmcid.upper().startswith("PMC") else pmcid
@@ -318,8 +383,8 @@ def _drop_citation_markers(root: ET.Element) -> None:
                 _remove_keep_tail(parent, child)
 
 
-def _parse_bioc(data: Any) -> str | None:
-    """Extract body paragraphs from BioC JSON (list or dict forms)."""
+def _parse_bioc(data: Any) -> list[tuple[str, str]] | None:
+    """Extract body paragraphs from BioC JSON as (section, text) pairs."""
     documents: list[dict] = []
     if isinstance(data, list):
         for item in data:
@@ -336,7 +401,7 @@ def _parse_bioc(data: Any) -> str | None:
         elif "passages" in data:
             documents.append(data)
 
-    paragraphs: list[str] = []
+    paragraphs: list[tuple[str, str]] = []
     for doc in documents:
         for passage in doc.get("passages") or []:
             if not isinstance(passage, dict):
@@ -345,24 +410,24 @@ def _parse_bioc(data: Any) -> str | None:
             if not text:
                 continue
             infons = passage.get("infons") or {}
-            section_type = str(
-                infons.get("type")
-                or infons.get("section_type")
-                or infons.get("section")
-                or ""
+            passage_type = str(infons.get("type") or "").lower()
+            raw_section = str(
+                infons.get("section_type") or infons.get("section") or ""
             ).lower()
-            if section_type in _SKIP_TYPES:
+            skip_key = passage_type or raw_section
+            if skip_key in _SKIP_TYPES:
                 continue
-            if "ref" in section_type and section_type != "abstract":
+            if passage_type.startswith("title"):
                 continue
-            paragraphs.append(text)
+            if "ref" in skip_key and skip_key != "abstract":
+                continue
+            paragraphs.append((normalize_section(raw_section), text))
 
-    if not paragraphs:
-        return None
-    return "\n\n".join(paragraphs)
+    return paragraphs or None
 
 
-def _parse_pmc_xml(xml_text: str) -> str | None:
+def _parse_pmc_xml(xml_text: str) -> list[tuple[str, str]] | None:
+    """Extract body paragraphs; section is empty (XML fallback has weak structure)."""
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
@@ -378,18 +443,18 @@ def _parse_pmc_xml(xml_text: str) -> str | None:
     body = root.find(".//body")
     target = body if body is not None else root
     _drop_citation_markers(target)
-    parts: list[str] = []
+    parts: list[tuple[str, str]] = []
     for p in target.iter("p"):
         text = strip_inline_citations(re.sub(r"\s+", " ", "".join(p.itertext())).strip())
         if text:
-            parts.append(text)
+            parts.append(("", text))
     if not parts:
         # Fallback: all text
         text = strip_inline_citations(
             re.sub(r"\s+", " ", "".join(target.itertext())).strip()
         )
-        return text or None
-    return "\n\n".join(parts)
+        return [("", text)] if text else None
+    return parts
 
 
 def _find_parent(root: ET.Element, child: ET.Element) -> ET.Element | None:

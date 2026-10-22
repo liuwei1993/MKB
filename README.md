@@ -45,7 +45,7 @@ pip install -r backend/requirements.txt
 uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-前端（默认 `http://127.0.0.1:5173`，已代理 `/api`）：
+前端（默认 `http://127.0.0.1:6173`，已代理 `/api`）：
 
 ```bash
 cd frontend

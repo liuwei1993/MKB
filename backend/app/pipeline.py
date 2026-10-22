@@ -391,11 +391,15 @@ async def suggest_followups(llm: LLMClient, question: str, answer: str) -> list[
 
 
 def passage_items(chunks: list[Chunk]) -> list[dict[str, str]]:
-    return [
-        {"pmid": chunk.pmid, "source": chunk.source, "text": chunk.text}
-        for chunk in chunks
-        if chunk.pmid and chunk.text.strip()
-    ]
+    items: list[dict[str, str]] = []
+    for chunk in chunks:
+        if not chunk.pmid or not chunk.text.strip():
+            continue
+        item = {"pmid": chunk.pmid, "source": chunk.source, "text": chunk.text}
+        if chunk.section:
+            item["section"] = chunk.section
+        items.append(item)
+    return items
 
 
 def passage_items_from_articles(
@@ -709,7 +713,11 @@ async def _retrieve_evidence(
             len(chunks), ft_chunks, len(chunks) - ft_chunks,
         )
         top = await retrieve_chunks(
-            llm, standalone, chunks, top_k=settings.rag_top_k
+            llm,
+            standalone,
+            chunks,
+            top_k=settings.rag_top_k,
+            question_type=question_type,
         )
         evidence = format_rag_evidence(top, articles)
         used_rag = True
