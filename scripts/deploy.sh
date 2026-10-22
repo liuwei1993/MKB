@@ -214,6 +214,15 @@ server {
     root ${REMOTE_DIR}/frontend/dist;
     index index.html;
 
+    location /assets/ {
+        try_files \$uri =404;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
     location / {
         try_files \$uri \$uri/ /index.html;
     }
