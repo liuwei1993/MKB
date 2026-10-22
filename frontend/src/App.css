@@ -278,11 +278,22 @@
   }
 }
 
+/* 系统开启「减少动态效果」时仍用脉冲提示进行中，避免退回静态实心圆 */
 @media (prefers-reduced-motion: reduce) {
   .mark.active {
-    animation: none;
     border-color: var(--accent);
-    box-shadow: inset 0 0 0 4px var(--accent);
+    box-shadow: none;
+    animation: mark-pulse 1s ease-in-out infinite;
+  }
+}
+
+@keyframes mark-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
   }
 }
 
