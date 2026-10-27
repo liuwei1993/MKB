@@ -26,6 +26,12 @@ EXCERPT_MAX_CHARS = 500
 LAST_ANSWER_MAX_CHARS = 12000
 RECENT_MAX_TURNS = 3
 QUESTION_MAX_CHARS = 4000
+# ~1000 Chinese chars per retrieval query; completion budget stays high for long outlines.
+CHARS_PER_QUERY = 1000
+# deepseek-v4.1-flash 类长上下文模型：输出额度尽量放开，可用 ANSWER_MAX_TOKENS 覆盖。
+ANSWER_MAX_TOKENS = 65536
+# Rough upper bound: Chinese often needs ~1.5–2 tokens/char; keep headroom.
+_TOKENS_PER_CHAR = 3
 
 UNDERSTAND_SYSTEM = """你是医学检索助手。根据对话上下文，判断用户本轮发言与历史的关系，并给出可独立检索的问题与 PubMed 检索式。
 只返回 JSON，不要 markdown，不要解释：
@@ -38,9 +44,10 @@ relation 只能是以下三者之一：
 
 规则：
 - 没有更早对话时，relation 必须是 new_topic。
-- queries 为 1 到 3 条英文检索式；可用 MeSH 风格词汇、同义词和简单 AND/OR；每条保持简短。布尔运算符 AND、OR、NOT 必须大写；多个词的术语加引号。不要写 [pt]、[MeSH Terms]、人类或年份限制，研究设计过滤由系统追加。rephrase 时为空数组。
-- question_type 只能是 treatment、prevention、diagnosis、prognosis、etiology、mechanism、other。疗效用 treatment，预防用 prevention，诊断用 diagnosis，预后用 prognosis，病因用 etiology，机制用 mechanism，其余用 other。
-- standalone_question 用中文，完整、可单独理解。"""
+- queries 为英文 PubMed 检索式数组。条数由问题复杂度自行决定，暂不设上限：概念少、范围窄时 1～2 条即可；概念多、同义词多、涉及多种干预/结局/人群或对比面广时，应增加互补检索式（不同同义词、关键子问题、主要对照角度），避免无意义重复。可用 MeSH 风格词汇、同义词和简单 AND/OR；每条保持简短。布尔运算符 AND、OR、NOT 必须大写；多个词的术语加引号。不要写 [pt]、[MeSH Terms]、人类或年份限制，研究设计过滤由系统追加。rephrase 时为空数组。
+- 若用户输入是多章节提纲/大纲/综述目录（含解剖、机制、分型、临床表现、诊断、治疗等并列主题）：必须按独立子主题分别写检索式，覆盖用户明确列出的各主要板块，禁止只围绕「治疗/管理」而忽略解剖、损伤机制、分型、临床表现等已写出的主题。例如锁骨骨折大纲应同时包含 clavicle anatomy、fracture mechanism / biomechanics、classification、clinical presentation，以及 treatment 等，而不是仅有 treatment/management。
+- question_type 只能是 treatment、prevention、diagnosis、prognosis、etiology、mechanism、other。疗效用 treatment，预防用 prevention，诊断用 diagnosis，预后用 prognosis，病因用 etiology，机制/解剖/病理生理用 mechanism，其余用 other。多主题综述/大纲且治疗并非唯一重点时用 other，避免整单被收成纯疗效检索。
+- standalone_question 用中文，完整、可单独理解；若是大纲，概括为「关于某主题的多章节综述（含……）」并点出主要板块。"""
 
 SUMMARY_SYSTEM = """你把医学问答对话压缩成一段中文摘要，供后续追问消解指代。
 只保留：疾病、药物、人群、用户关心的问题、已给出的主要结论、引用过的 PMID。
@@ -48,18 +55,19 @@ SUMMARY_SYSTEM = """你把医学问答对话压缩成一段中文摘要，供后
 
 ANSWER_SYSTEM = """你是医学文献助手。仅依据用户提供的文献检索段落（可能来自开放获取全文或摘要）作答，禁止编造未给出的文献或 PMID。
 要求：
-1. 用中文分点回答，结构清晰。回答「本轮独立问题」，用户原话仅帮助理解措辞。
+1. 用中文分点回答，结构清晰。回答「本轮独立问题」，用户原话仅帮助理解措辞。若问题是多章节大纲，按大纲板块展开，各板块都要写到，不要只写治疗或总结。
 2. 对关键结论标注证据来源，格式为 [PMID:数字]。
 3. 如证据来自全文段落或摘要，可按材料如实引用，勿夸大证据等级。
-4. 如证据冲突或不足，明确说明局限。
+4. 如证据冲突或不足，明确说明局限；证据不足的板块也要单独写出「证据不足」，不要整段提前收束。
 5. 若消息中有「上一轮摘录」，只用于对比或衔接，不得将其 PMID 当作本轮证据，除非该 PMID 也出现在本轮文献证据中。
-6. 末尾用一两句总结临床/科研含义。
-7. 声明：回答仅供科研与学习参考，不能替代临床诊疗决策。
-8. 适合对照或罗列成分、指标时使用 Markdown 表格。
-9. 引用格式只能是 [PMID:数字]，不要改成脚注序号或其他写法。
-10. 若证据里同时有系统综述、荟萃分析或随机对照试验与较低等级研究，优先综合更高等级的研究设计。单篇研究不能写成定论。
-11. 撤稿文献不能当作有效证据。
-12. 不要评价材料中没有写出的样本量、置信区间、资金来源或利益冲突。"""
+6. 严格按用户消息中的「目标篇幅」写作：总字数接近该目标（可有约 ±20% 浮动），写满各板块后再做总结；不要过早结束。
+7. 末尾用一两句总结临床/科研含义。
+8. 声明：回答仅供科研与学习参考，不能替代临床诊疗决策。
+9. 适合对照或罗列成分、指标时使用 Markdown 表格。
+10. 引用格式只能是 [PMID:数字]，不要改成脚注序号或其他写法。
+11. 若证据里同时有系统综述、荟萃分析或随机对照试验与较低等级研究，优先综合更高等级的研究设计。单篇研究不能写成定论。
+12. 撤稿文献不能当作有效证据。
+13. 不要评价材料中没有写出的样本量、置信区间、资金来源或利益冲突。"""
 
 SUGGEST_SYSTEM = """根据本轮医学问答，提出用户可能接着追问的问题。
 只返回 JSON，不要 markdown，不要解释：
@@ -200,8 +208,6 @@ def _queries_from(data: dict) -> list[str]:
         query = str(item).strip()
         if query and query not in out:
             out.append(query)
-        if len(out) >= 3:
-            break
     return out
 
 
@@ -222,7 +228,7 @@ def parse_understand(raw: str, question: str, *, has_history: bool) -> dict[str,
     return {
         "relation": relation,
         "standalone_question": standalone,
-        "queries": queries[:3],
+        "queries": queries,
         "question_type": question_type,
     }
 
@@ -275,24 +281,28 @@ def previous_turn(ctx: dict[str, Any]) -> dict[str, Any] | None:
     return recent[-1]
 
 
+def understand_user_message(question: str, ctx: dict[str, Any]) -> str:
+    return f"{format_context_block(ctx)}\n\n用户本轮原话：\n{question}"
+
+
 async def understand_turn(
     llm: LLMClient,
     question: str,
     ctx: dict[str, Any],
+    *,
+    system_prompt: str | None = None,
+    user_prompt: str | None = None,
 ) -> dict[str, Any]:
     has_history = bool(str(ctx.get("summary") or "").strip() or ctx.get("recent"))
     raw = await llm.chat(
         [
-            {"role": "system", "content": UNDERSTAND_SYSTEM},
+            {"role": "system", "content": system_prompt or UNDERSTAND_SYSTEM},
             {
                 "role": "user",
-                "content": (
-                    f"{format_context_block(ctx)}\n\n"
-                    f"用户本轮原话：\n{question}"
-                ),
+                "content": user_prompt or understand_user_message(question, ctx),
             },
         ],
-        max_tokens=512,
+        max_tokens=1536,
         temperature=0.1,
     )
     return parse_understand(raw, question, has_history=has_history)
@@ -369,19 +379,30 @@ def parse_suggestions(raw: str) -> list[str]:
     return out
 
 
-async def suggest_followups(llm: LLMClient, question: str, answer: str) -> list[str]:
+def suggest_user_message(question: str, answer: str) -> str:
+    return (
+        f"本轮问题：\n{_clip(question, QUESTION_MAX_CHARS)}\n\n"
+        f"本轮回答：\n{_clip(answer, 4000)}"
+    )
+
+
+async def suggest_followups(
+    llm: LLMClient,
+    question: str,
+    answer: str,
+    *,
+    system_prompt: str | None = None,
+    user_prompt: str | None = None,
+) -> list[str]:
     answer = (answer or "").strip()
     if not answer:
         return []
     raw = await llm.chat(
         [
-            {"role": "system", "content": SUGGEST_SYSTEM},
+            {"role": "system", "content": system_prompt or SUGGEST_SYSTEM},
             {
                 "role": "user",
-                "content": (
-                    f"本轮问题：\n{_clip(question, QUESTION_MAX_CHARS)}\n\n"
-                    f"本轮回答：\n{_clip(answer, 4000)}"
-                ),
+                "content": user_prompt or suggest_user_message(question, answer),
             },
         ],
         max_tokens=300,
@@ -435,7 +456,40 @@ def format_evidence_fallback(articles: list[Article], max_chars: int) -> str:
     return "\n\n".join(blocks)
 
 
-def _answer_user_message(
+def answer_content_queries(queries: list[str] | None) -> list[str]:
+    """Broad queries only — exclude synthetic study-design filters that contain [pt]."""
+    cleaned = [str(q).strip() for q in (queries or []) if str(q).strip()]
+    broad = [q for q in cleaned if "[pt]" not in q]
+    return broad or cleaned
+
+
+def answer_target_chars(queries: list[str] | None) -> int:
+    """Scale answer length with retrieval complexity: ~1000 Chinese chars per content query."""
+    n = len(answer_content_queries(queries))
+    return max(CHARS_PER_QUERY, n * CHARS_PER_QUERY)
+
+
+def answer_completion_tokens(
+    queries: list[str] | None,
+    *,
+    floor: int | None = None,
+    cap: int | None = None,
+) -> int:
+    """Completion budget: enough for target chars, capped by settings.answer_max_tokens.
+
+    ``cap`` is the configured high ceiling (default ANSWER_MAX_TOKENS). ``floor`` is a
+    minimum for short answers. Needed tokens scale with target chars but never exceed cap
+    when cap is set.
+    """
+    target = answer_target_chars(queries)
+    minimum = max(1, floor if floor is not None else 4096)
+    needed = max(minimum, target * _TOKENS_PER_CHAR)
+    limit = ANSWER_MAX_TOKENS if cap is None else max(1, cap)
+    # Prefer the high configured ceiling so long answers are not truncated early.
+    return max(needed, limit) if needed <= limit else limit
+
+
+def answer_user_message(
     *,
     question: str,
     standalone: str,
@@ -446,6 +500,7 @@ def _answer_user_message(
     fulltext_n: int,
     with_abs: int,
     ctx: dict[str, Any],
+    target_chars: int | None = None,
 ) -> str:
     prior = previous_turn(ctx)
     prior_block = ""
@@ -455,11 +510,21 @@ def _answer_user_message(
             f"用户：{prior.get('question') or ''}\n"
             f"助手：{prior.get('excerpt') or '（无）'}\n\n"
         )
+    content_queries = answer_content_queries(queries)
+    chars = (
+        target_chars
+        if target_chars is not None
+        else answer_target_chars(content_queries)
+    )
+    query_n = len(content_queries)
     return (
         f"{prior_block}"
         f"本轮独立问题：\n{standalone}\n\n"
         f"用户原话：\n{question}\n\n"
-        f"检索查询：{queries}\n\n"
+        f"检索查询（内容检索式 {query_n} 条）：{queries}\n\n"
+        f"目标篇幅：约 {chars} 字（按每条内容检索式约 {CHARS_PER_QUERY} 字估算，"
+        f"不含系统追加的研究设计过滤式）。"
+        f"请写到接近该篇幅；多章节问题须覆盖各板块后再总结，禁止中途截断式收束。\n\n"
         f"以下为文献证据（模式：{mode}；检索 {article_count} 篇，"
         f"开放获取全文 {fulltext_n} 篇，有摘要 {with_abs} 篇）：\n\n"
         f"{evidence}"
@@ -568,17 +633,21 @@ async def run_ask(
                             return
                 timings["retrieve_s"] = round(time.perf_counter() - t, 2)
 
+            target_chars = 0
+            answer_truncated = False
             if relation == "rephrase":
                 messages = [
                     {"role": "system", "content": REPHRASE_SYSTEM},
                     {"role": "user", "content": _rephrase_user_message(question, ctx)},
                 ]
+                answer_max_tokens = min(4096, settings.answer_max_tokens)
             else:
+                target_chars = answer_target_chars(broad_queries)
                 messages = [
                     {"role": "system", "content": ANSWER_SYSTEM},
                     {
                         "role": "user",
-                        "content": _answer_user_message(
+                        "content": answer_user_message(
                             question=question,
                             standalone=standalone,
                             queries=queries,
@@ -588,21 +657,28 @@ async def run_ask(
                             fulltext_n=fulltext_n,
                             with_abs=with_abs,
                             ctx=ctx,
+                            target_chars=target_chars,
                         ),
                     },
                 ]
+                answer_max_tokens = answer_completion_tokens(
+                    broad_queries,
+                    floor=4096,
+                    cap=settings.answer_max_tokens,
+                )
 
             yield _status("正在整理回答…", "answer")
             answer_parts: list[str] = []
             t = time.perf_counter()
             async for token in llm.chat_stream(
                 messages,
-                max_tokens=2048,
+                max_tokens=answer_max_tokens,
                 temperature=0.2,
             ):
                 answer_parts.append(token)
                 yield {"type": "token", "content": token}
             timings["answer_s"] = round(time.perf_counter() - t, 2)
+            answer_truncated = bool(getattr(llm, "last_stream_truncated", False))
 
             answer_text = "".join(answer_parts)
             t = time.perf_counter()
@@ -630,6 +706,9 @@ async def run_ask(
                         "with_abstract": with_abs,
                         "evidence_chars": len(evidence),
                         "answer_chars": len(answer_text),
+                        "target_chars": target_chars or None,
+                        "answer_max_tokens": answer_max_tokens,
+                        "answer_truncated": answer_truncated,
                         "rag_top_k": settings.rag_top_k,
                         "fulltext_max_articles": settings.fulltext_max_articles,
                         "target_pmids": settings.target_pmids,
@@ -651,6 +730,108 @@ async def run_ask(
         await llm.__aexit__(None, None, None)
 
 
+async def run_pubmed_search(
+    pubmed: PubMedClient,
+    queries: list[str],
+    priority_query: str | None = None,
+) -> list[Article]:
+    return await pubmed.search_articles(queries, priority_query=priority_query)
+
+
+async def run_fulltext(
+    settings: Settings,
+    pmc: PMCClient,
+    articles: list[Article],
+    question_type: str,
+    candidate_pmids: list[str] | None = None,
+) -> tuple[int, list[str]]:
+    """Attach OA fulltexts onto articles in place. Returns (fetched_n, candidate_pmids)."""
+    if candidate_pmids is not None:
+        by_pmid = {a.pmid: a for a in articles}
+        candidates = [by_pmid[pmid] for pmid in candidate_pmids if pmid in by_pmid]
+    else:
+        candidates = select_fulltext_candidates(
+            articles, question_type, settings.fulltext_max_articles
+        )
+    fulltext_n = await pmc.attach_fulltexts(articles, candidates)
+    return fulltext_n, [c.pmid for c in candidates]
+
+
+async def run_rag_passages(
+    settings: Settings,
+    llm: LLMClient,
+    articles: list[Article],
+    standalone: str,
+    question_type: str,
+) -> dict[str, Any]:
+    """Chunk + retrieve evidence passages. Falls back to abstracts on failure."""
+    evidence_articles = articles_for_evidence(articles)
+    fulltext_n = sum(1 for a in articles if a.has_fulltext)
+    with_abs = sum(1 for a in evidence_articles if a.abstract.strip())
+    used_rag = False
+    top: list[Chunk] = []
+    try:
+        chunks = build_chunks(
+            evidence_articles,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            abstract_max_chars=settings.abstract_max_chars,
+        )
+        ft_chunks = sum(1 for c in chunks if c.source == "fulltext")
+        logger.info(
+            "rag_chunks total=%d fulltext=%d abstract=%d",
+            len(chunks),
+            ft_chunks,
+            len(chunks) - ft_chunks,
+        )
+        top = await retrieve_chunks(
+            llm,
+            standalone,
+            chunks,
+            top_k=settings.rag_top_k,
+            question_type=question_type,
+        )
+        evidence = format_rag_evidence(top, articles)
+        used_rag = True
+    except Exception as rag_err:
+        logger.warning("rag_fallback reason=%s", rag_err)
+        evidence = format_evidence_fallback(
+            evidence_articles, settings.abstract_max_chars
+        )
+
+    if used_rag:
+        items = passage_items(top)
+    else:
+        items = passage_items_from_articles(
+            evidence_articles, settings.abstract_max_chars
+        )
+    return {
+        "passages": items,
+        "evidence": evidence,
+        "mode": "RAG 段落" if used_rag else "摘要",
+        "article_count": len(evidence_articles),
+        "fulltext_n": fulltext_n,
+        "with_abs": with_abs,
+        "used_rag": used_rag,
+        "top_count": len(top) if used_rag else 0,
+        "fulltext_passage_count": (
+            sum(1 for c in top if c.source == "fulltext") if used_rag else 0
+        ),
+    }
+
+
+def split_search_queries(queries: list[str]) -> tuple[list[str], str | None]:
+    """Split a flat query list into broad queries + optional design-filter priority."""
+    cleaned = [str(q).strip() for q in queries if str(q).strip()]
+    if not cleaned:
+        return [], None
+    priority = next((q for q in cleaned if "[pt]" in q), None)
+    broad = [q for q in cleaned if q != priority]
+    if not broad and priority:
+        return [priority], None
+    return broad, priority
+
+
 async def _retrieve_evidence(
     settings: Settings,
     llm: LLMClient,
@@ -662,7 +843,7 @@ async def _retrieve_evidence(
     question_type: str,
 ) -> AsyncIterator[dict[str, Any]]:
     yield _status("正在检索文献…", "search")
-    articles = await pubmed.search_articles(queries, priority_query=priority_query)
+    articles = await run_pubmed_search(pubmed, queries, priority_query)
     if not articles:
         yield {
             "type": "error",
@@ -677,10 +858,7 @@ async def _retrieve_evidence(
     }
 
     yield _status("正在获取开放获取全文…", "fulltext")
-    fulltext_candidates = select_fulltext_candidates(
-        articles, question_type, settings.fulltext_max_articles
-    )
-    fulltext_n = await pmc.attach_fulltexts(articles, fulltext_candidates)
+    fulltext_n, _ = await run_fulltext(settings, pmc, articles, question_type)
     evidence_articles = articles_for_evidence(articles)
 
     yield {
@@ -696,61 +874,27 @@ async def _retrieve_evidence(
             "fulltext",
         )
 
-    evidence: str
-    used_rag = False
-    top: list[Chunk] = []
-    try:
-        yield _status("正在检索相关段落…", "passages")
-        chunks = build_chunks(
-            evidence_articles,
-            chunk_size=settings.chunk_size,
-            chunk_overlap=settings.chunk_overlap,
-            abstract_max_chars=settings.abstract_max_chars,
-        )
-        ft_chunks = sum(1 for c in chunks if c.source == "fulltext")
-        logger.info(
-            "rag_chunks total=%d fulltext=%d abstract=%d",
-            len(chunks), ft_chunks, len(chunks) - ft_chunks,
-        )
-        top = await retrieve_chunks(
-            llm,
-            standalone,
-            chunks,
-            top_k=settings.rag_top_k,
-            question_type=question_type,
-        )
-        evidence = format_rag_evidence(top, articles)
-        used_rag = True
-        ft_chunks = sum(1 for c in top if c.source == "fulltext")
+    yield _status("正在检索相关段落…", "passages")
+    rag = await run_rag_passages(
+        settings, llm, articles, standalone, question_type
+    )
+    if rag["used_rag"]:
         yield _status(
             (
-                f"已获取 {fulltext_n} 篇全文，选用 {len(top)} 个段落"
-                f"（其中全文段落 {ft_chunks}），正在整理回答…"
+                f"已获取 {fulltext_n} 篇全文，选用 {rag['top_count']} 个段落"
+                f"（其中全文段落 {rag['fulltext_passage_count']}），正在整理回答…"
             ),
             "passages",
         )
-    except Exception as rag_err:
-        logger.warning("rag_fallback reason=%s", rag_err)
-        yield _status(f"段落检索失败，回退摘要作答（{rag_err}）…", "passages")
-        evidence = format_evidence_fallback(
-            evidence_articles, settings.abstract_max_chars
-        )
-
-    if used_rag:
-        yield {"type": "passages", "items": passage_items(top)}
     else:
-        yield {
-            "type": "passages",
-            "items": passage_items_from_articles(
-                evidence_articles, settings.abstract_max_chars
-            ),
-        }
+        yield _status("段落检索失败，回退摘要作答…", "passages")
 
+    yield {"type": "passages", "items": rag["passages"]}
     yield {
         "type": "_evidence",
-        "evidence": evidence,
-        "mode": "RAG 段落" if used_rag else "摘要",
-        "article_count": len(evidence_articles),
-        "fulltext_n": fulltext_n,
-        "with_abs": with_abs,
+        "evidence": rag["evidence"],
+        "mode": rag["mode"],
+        "article_count": rag["article_count"],
+        "fulltext_n": rag["fulltext_n"],
+        "with_abs": rag["with_abs"],
     }

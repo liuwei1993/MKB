@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from . import debug_session as debug_store
 from .config import get_settings
 from .llm import LLMClient
 from .pipeline import run_ask
@@ -90,6 +92,117 @@ async def translate_titles_api(body: TranslateTitlesRequest):
         logger.warning("title translation failed", exc_info=True)
         titles = {}
     return {"titles": titles}
+
+
+class DebugCreateRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=4000)
+
+
+class DebugRunRequest(BaseModel):
+    system_prompt: str | None = Field(default=None, max_length=20000)
+    user_prompt: str | None = Field(default=None, max_length=100000)
+    overrides: dict[str, Any] | None = None
+
+
+class DebugPatchRequest(BaseModel):
+    output: dict[str, Any]
+
+
+class DebugTranslateQueriesRequest(BaseModel):
+    queries: list[str] | None = Field(default=None, max_length=100)
+
+
+def _require_debug_enabled() -> None:
+    if not get_settings().enable_debug_api:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _require_session(session_id: str) -> debug_store.DebugSession:
+    session = debug_store.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="调试会话不存在或已过期")
+    return session
+
+
+@app.post("/api/debug/sessions")
+async def debug_create_session(body: DebugCreateRequest):
+    _require_debug_enabled()
+    try:
+        session = debug_store.create_session(get_settings(), body.question)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return debug_store.public_view(session)
+
+
+@app.get("/api/debug/sessions/{session_id}")
+async def debug_get_session(session_id: str):
+    _require_debug_enabled()
+    session = _require_session(session_id)
+    return debug_store.public_view(session)
+
+
+@app.delete("/api/debug/sessions/{session_id}")
+async def debug_delete_session(session_id: str):
+    _require_debug_enabled()
+    deleted = debug_store.delete_session(session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="调试会话不存在或已过期")
+    return {"ok": True}
+
+
+@app.post("/api/debug/sessions/{session_id}/run")
+async def debug_run_step(session_id: str, body: DebugRunRequest | None = None):
+    _require_debug_enabled()
+    session = _require_session(session_id)
+    payload = body or DebugRunRequest()
+    try:
+        return await debug_store.run_current_step(
+            session,
+            system_prompt=payload.system_prompt,
+            user_prompt=payload.user_prompt,
+            overrides=payload.overrides,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("debug_run_failed session=%s", session_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.patch("/api/debug/sessions/{session_id}/output")
+async def debug_patch_output(session_id: str, body: DebugPatchRequest):
+    _require_debug_enabled()
+    session = _require_session(session_id)
+    try:
+        return debug_store.patch_output(session, body.output)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/debug/sessions/{session_id}/advance")
+async def debug_advance(session_id: str):
+    _require_debug_enabled()
+    session = _require_session(session_id)
+    try:
+        return debug_store.advance(session)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/debug/sessions/{session_id}/translate-queries")
+async def debug_translate_queries(
+    session_id: str, body: DebugTranslateQueriesRequest | None = None
+):
+    _require_debug_enabled()
+    session = _require_session(session_id)
+    payload = body or DebugTranslateQueriesRequest()
+    try:
+        return await debug_store.translate_queries(session, payload.queries)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("debug_translate_failed session=%s", session_id)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/ask")

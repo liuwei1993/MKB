@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -8,12 +9,16 @@ import httpx
 
 from .config import Settings
 
+logger = logging.getLogger(__name__)
+
 
 class LLMClient:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None):
         self.settings = settings
         self._client = client
         self._owns_client = client is None
+        self.last_stream_finish_reason: str | None = None
+        self.last_stream_truncated: bool = False
 
     async def __aenter__(self) -> LLMClient:
         if self._client is None:
@@ -96,7 +101,59 @@ class LLMClient:
             raise RuntimeError(f"LLM error ({r.status_code}): {err}")
         choice = (data.get("choices") or [{}])[0]
         content = (choice.get("message") or {}).get("content") or ""
+        finish = choice.get("finish_reason")
+        usage = data.get("usage") or {}
+        if finish == "length":
+            logger.warning(
+                "llm_chat truncated finish_reason=length max_tokens=%s "
+                "completion_tokens=%s chars=%d",
+                max_tokens,
+                usage.get("completion_tokens"),
+                len(content or ""),
+            )
         return content.strip()
+
+    async def chat_result(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int = 1024,
+        temperature: float = 0.2,
+    ) -> dict[str, Any]:
+        """Like chat(), but also returns finish_reason / usage for callers that care."""
+        assert self._client is not None
+        url = f"{self.settings.llm_base_url}/chat/completions"
+        payload = {
+            "model": self.settings.llm_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+            **self._thinking_off(),
+        }
+        r = await self._client.post(url, headers=self._headers(), json=payload)
+        data = r.json()
+        if r.status_code >= 400:
+            err = data.get("error") or data
+            raise RuntimeError(f"LLM error ({r.status_code}): {err}")
+        choice = (data.get("choices") or [{}])[0]
+        content = ((choice.get("message") or {}).get("content") or "").strip()
+        finish = choice.get("finish_reason")
+        usage = data.get("usage") or {}
+        if finish == "length":
+            logger.warning(
+                "llm_chat truncated finish_reason=length max_tokens=%s "
+                "completion_tokens=%s chars=%d",
+                max_tokens,
+                usage.get("completion_tokens"),
+                len(content),
+            )
+        return {
+            "content": content,
+            "finish_reason": finish,
+            "usage": usage,
+            "truncated": finish == "length",
+        }
 
     async def chat_stream(
         self,
@@ -115,6 +172,9 @@ class LLMClient:
             "stream": True,
             **self._thinking_off(),
         }
+        self.last_stream_finish_reason = None
+        self.last_stream_truncated = False
+        chars = 0
         async with self._client.stream(
             "POST", url, headers=self._headers(), json=payload
         ) as r:
@@ -136,8 +196,20 @@ class LLMClient:
                     chunk: dict[str, Any] = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-                delta = ((chunk.get("choices") or [{}])[0]).get("delta") or {}
+                choice = (chunk.get("choices") or [{}])[0]
+                finish = choice.get("finish_reason")
+                if finish:
+                    self.last_stream_finish_reason = str(finish)
+                    self.last_stream_truncated = finish == "length"
+                delta = choice.get("delta") or {}
                 # Only surface answer text; ignore reasoning_content
                 content = delta.get("content")
                 if content:
+                    chars += len(content)
                     yield content
+        if self.last_stream_truncated:
+            logger.warning(
+                "llm_stream truncated finish_reason=length max_tokens=%s chars=%d",
+                max_tokens,
+                chars,
+            )

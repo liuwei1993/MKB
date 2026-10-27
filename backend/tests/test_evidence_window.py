@@ -5,6 +5,8 @@ from backend.app.config import Settings
 from backend.app.pipeline import (
     ANSWER_SYSTEM,
     UNDERSTAND_SYSTEM,
+    answer_completion_tokens,
+    answer_target_chars,
     design_filter_query,
     parse_understand,
 )
@@ -54,6 +56,17 @@ class QuestionTypeTest(unittest.TestCase):
         )
         self.assertEqual(parsed["question_type"], "other")
         self.assertEqual(parsed["queries"], ["aspirin"])
+
+    def test_keeps_more_than_three_queries(self):
+        queries = [f"q{i}" for i in range(1, 6)]
+        payload = (
+            '{"relation":"new_topic","question_type":"treatment",'
+            '"standalone_question":"复杂问题","queries":'
+            + str(queries).replace("'", '"')
+            + "}"
+        )
+        parsed = parse_understand(payload, "复杂问题", has_history=False)
+        self.assertEqual(parsed["queries"], queries)
 
     def test_invalid_question_type_is_other(self):
         parsed = parse_understand(
@@ -120,6 +133,28 @@ class DesignFilterTest(unittest.TestCase):
         self.assertIn("单篇", ANSWER_SYSTEM)
         self.assertIn("撤稿", ANSWER_SYSTEM)
         self.assertIn("样本量", ANSWER_SYSTEM)
+        self.assertIn("目标篇幅", ANSWER_SYSTEM)
+
+
+class AnswerLengthTest(unittest.TestCase):
+    def test_target_chars_scales_with_queries(self):
+        self.assertEqual(answer_target_chars([]), 1000)
+        self.assertEqual(answer_target_chars(["a"]), 1000)
+        self.assertEqual(answer_target_chars(["a", "b", "c"]), 3000)
+        self.assertEqual(answer_target_chars(["a"] * 6), 6000)
+
+    def test_target_chars_ignores_design_filter(self):
+        queries = [
+            "clavicle fracture treatment",
+            '(clavicle fracture treatment) AND ("systematic review"[pt])',
+        ]
+        self.assertEqual(answer_target_chars(queries), 1000)
+
+    def test_completion_tokens_respects_cap(self):
+        tokens = answer_completion_tokens(["a"] * 6, floor=4096, cap=65536)
+        self.assertEqual(tokens, 65536)
+        capped = answer_completion_tokens(["a"] * 6, floor=4096, cap=8192)
+        self.assertEqual(capped, 8192)
 
 
 class FulltextSlotTest(unittest.TestCase):

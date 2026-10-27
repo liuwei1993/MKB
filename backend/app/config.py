@@ -17,7 +17,8 @@ class Settings(BaseModel):
     ncbi_api_key: str
 
     pubmed_timeout: float = 30.0
-    llm_timeout: float = 120.0
+    # Long outline answers (debug non-stream / homepage stream) need a generous read budget.
+    llm_timeout: float = 1800.0
     target_pmids: int = 100
     retmax_per_query: int = 25
     abstract_max_chars: int = 1200
@@ -27,9 +28,12 @@ class Settings(BaseModel):
     rag_top_k: int = 12
     chunk_size: int = 1000
     chunk_overlap: int = 150
+    enable_debug_api: bool = True
+    answer_max_tokens: int = 65536
 
 
 def get_settings() -> Settings:
+    debug_raw = os.getenv("MKB_ENABLE_DEBUG", "1").strip().lower()
     return Settings(
         llm_model=os.getenv("LLM_MODEL", "deepseek-v4.1-flash"),
         llm_api_key=os.getenv("LLM_API_KEY", ""),
@@ -43,4 +47,7 @@ def get_settings() -> Settings:
         rag_top_k=int(os.getenv("RAG_TOP_K", "12")),
         chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
+        enable_debug_api=debug_raw not in {"0", "false", "no", "off"},
+        llm_timeout=float(os.getenv("LLM_TIMEOUT", "1800")),
+        answer_max_tokens=int(os.getenv("ANSWER_MAX_TOKENS", "65536")),
     )
